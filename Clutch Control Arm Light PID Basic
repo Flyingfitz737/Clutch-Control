@@ -53,7 +53,10 @@ void loop() {
 
   if (rpmValue > 0 && armSwitch == HIGH) {
     digitalWrite(valve1Pin, HIGH);
-    digitalWrite(motorPin, HIGH);
+    for (int pwmValue = 0; pwmValue <= 255; pwmValue += 5) {
+      analogWrite(motorPin, pwmValue);
+      delay(40); // 40 ms delay to reach 1 second total
+    }
     digitalWrite(armLightPin, HIGH);
     systemArmed = true;
 
@@ -66,7 +69,7 @@ void loop() {
   } else {
     digitalWrite(valve1Pin, LOW);
     digitalWrite(valve2Pin, LOW);
-    digitalWrite(motorPin, LOW);
+    analogWrite(motorPin, 0);
     digitalWrite(armLightPin, LOW);
     systemArmed = false;
   }
