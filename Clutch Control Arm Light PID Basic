@@ -23,6 +23,10 @@ double output = 0.0;
 double Kp = 1.0, Ki = 0.1, Kd = 0.05;
 PID myPID(&input, &output, &setPoint, Kp, Ki, Kd, DIRECT);
 
+// Timer variables
+unsigned long zeroPWMStartTime = 0;
+const unsigned long zeroPWMThreshold = 2000; // 2000 ms
+
 void setup() {
   Serial.begin(9600);
 
@@ -65,6 +69,17 @@ void loop() {
         input = rpmValue; // Update the input value from your sensor
         myPID.Compute();
         analogWrite(valve2Pin, output); // Use the output value to control the solenoid with PWM
+
+        // Check if PID output is zero
+        if (output == 0) {
+          if (zeroPWMStartTime == 0) {
+            zeroPWMStartTime = millis(); // Start timer
+          } else if (millis() - zeroPWMStartTime >= zeroPWMThreshold) {
+            digitalWrite(armLightPin, LOW); // Turn off arm light if zero PWM for more than 2000 ms
+          }
+        } else {
+          zeroPWMStartTime = 0; // Reset timer if output is not zero
+        }
     }
   } else {
     digitalWrite(valve1Pin, LOW);
