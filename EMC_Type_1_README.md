@@ -13,7 +13,7 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 ### 2. Automatic Sensor Inputs
 - **RPM Sensor**: Analog input from potentiometer or RPM sensor (Pin A0)
 - **Secondary Potentiometer**: Additional analog input for system feedback (Pin A1)
-- **Digital Switches**: Arm and clutch switch inputs with internal pullup resistors
+- **Digital Switches**: Arm switch input with internal pullup resistors
 
 ### 3. PID Control Loop
 - **Real-time Control**: Continuous PID computation for servo motor positioning
@@ -32,7 +32,6 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 Pin A0  - RPM Sensor/Potentiometer Input
 Pin A1  - Secondary Potentiometer Input
 Pin 2   - Arm Switch (Active LOW with internal pullup)
-Pin 3   - Clutch Switch (Active LOW with internal pullup)
 Pin 9   - Servo Motor PWM Output
 Pin 13  - Arming Light LED (Built-in LED)
 ```
@@ -41,7 +40,7 @@ Pin 13  - Arming Light LED (Built-in LED)
 - Arduino Uno
 - Servo motor (for clutch actuation)
 - Potentiometer or RPM sensor
-- Push buttons for arm/clutch switches
+- Push button for arm switch
 - LED (optional, built-in LED used by default)
 - PID_v1 Arduino Library
 - Servo Arduino Library
