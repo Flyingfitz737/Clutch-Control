@@ -12,14 +12,14 @@ const int potentiometerPin = A1;    // Additional potentiometer input
 const int servoPin = 9;             // PWM pin for servo motor control
 const int armLightPin = 13;         // LED pin for arming light (built-in LED)
 const int armSwitchPin = 2;         // Digital pin for arm switch
-const int clutchSwitchPin = 3;      // Digital pin for clutch switch
+
 
 // ===== Global Variables =====
 // Sensor readings
 int rpmValue = 0;
 int potValue = 0;
 bool armSwitch = false;
-bool clutchSwitch = false;
+
 bool systemArmed = false;
 
 // PID Control Variables
@@ -52,7 +52,7 @@ void setup() {
   pinMode(potentiometerPin, INPUT);
   pinMode(armLightPin, OUTPUT);
   pinMode(armSwitchPin, INPUT_PULLUP);
-  pinMode(clutchSwitchPin, INPUT_PULLUP);
+
   
   // Initialize servo
   clutchServo.attach(servoPin);
@@ -125,7 +125,7 @@ void readSensors() {
   
   // Read digital switches (active LOW with pullup)
   armSwitch = !digitalRead(armSwitchPin);
-  clutchSwitch = !digitalRead(clutchSwitchPin);
+
 }
 
 void processSerialInput() {
@@ -262,7 +262,7 @@ void printDetailedStatus() {
   Serial.println("  Current RPM: " + String(currentRPM));
   Serial.println("  Potentiometer: " + String(potValue));
   Serial.println("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
-  Serial.println("  Clutch Switch: " + String(clutchSwitch ? "PRESSED" : "RELEASED"));
+
   Serial.println();
   
   Serial.println("Control Parameters:");
