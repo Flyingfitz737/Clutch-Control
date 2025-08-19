@@ -22,7 +22,7 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 
 ### 4. Visual Feedback
 - **Arming Light**: LED indicator on Pin 13 (built-in LED)
-- **System Status**: Blinking pattern when armed, solid off when disarmed
+- **System Status**: Solid on when armed, solid off when disarmed
 - **Serial Monitor**: Comprehensive status reporting and command interface
 
 ## Hardware Connections
@@ -72,7 +72,7 @@ The system accepts the following commands via the Serial Monitor (9600 baud):
 ### Normal Operation
 1. **Sensor Reading**: System continuously reads RPM sensor and switches
 2. **PID Control**: When armed, PID controller adjusts servo position to maintain target RPM
-3. **Visual Feedback**: Arming light blinks when system is armed
+3. **Visual Feedback**: Arming light remains solid on when system is armed
 4. **Serial Output**: Status information displayed every 500ms
 
 ### Safety Features

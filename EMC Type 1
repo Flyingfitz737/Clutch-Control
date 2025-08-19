@@ -266,10 +266,10 @@ void runPIDControl() {
 }
 
 void updateOutputs() {
-  // Update arm light - blink when armed, solid when disarmed
+  // Update arm light - solid on when armed, solid off when disarmed
   if (systemArmed) {
-    // Blink arm light when armed
-    digitalWrite(armLightPin, (millis() / 250) % 2);
+    // Solid on when armed
+    digitalWrite(armLightPin, HIGH);
   } else {
     // Solid off when disarmed
     digitalWrite(armLightPin, LOW);
