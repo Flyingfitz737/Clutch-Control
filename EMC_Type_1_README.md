@@ -11,7 +11,7 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 - **System Control**: Arm/disarm the system remotely via serial interface
 
 ### 2. Automatic Sensor Inputs
-- **RPM Sensor**: Analog input from potentiometer or RPM sensor (Pin A0)
+- **RPM Sensor**: Digital pulse train input with interrupt detection (Pin 3)
 - **Secondary Potentiometer**: Additional analog input for system feedback (Pin A1)
 - **Digital Switches**: Arm switch input with internal pullup resistors
 
@@ -29,7 +29,7 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 
 ### Pin Assignments
 ```
-Pin A0  - RPM Sensor/Potentiometer Input
+Pin 3   - RPM Sensor Digital Pulse Train Input (Interrupt)
 Pin A1  - Secondary Potentiometer Input
 Pin 2   - Arm Switch (Active LOW with internal pullup)
 Pin 9   - Servo Motor PWM Output
@@ -39,7 +39,7 @@ Pin 13  - Arming Light LED (Built-in LED)
 ### Required Components
 - Arduino Uno
 - Servo motor (for clutch actuation)
-- Potentiometer or RPM sensor
+- Digital RPM sensor or ECU with pulse train output
 - Push button for arm switch
 - LED (optional, built-in LED used by default)
 - PID_v1 Arduino Library
@@ -125,7 +125,7 @@ RPM: 1180 | Target: 1200 | Servo: 95° | Armed: YES | PID Out: 95.00
 ### Pin Configuration
 Modify the pin definitions at the top of the code to match your hardware setup:
 ```cpp
-const int rpmSensorPin = A0;        // Change as needed
+const int rpmSensorPin = 3;         // Digital interrupt pin for pulse train
 const int servoPin = 9;             // PWM-capable pin required
 const int armLightPin = 13;         // Any digital pin
 ```
@@ -136,10 +136,16 @@ Default PID values can be adjusted in the code or via serial commands:
 double Kp = 2.0, Ki = 5.0, Kd = 1.0; // Default values
 ```
 
-### RPM Range
-Adjust the RPM mapping range based on your sensor:
+### RPM Sensor Configuration
+Adjust the pulses per revolution based on your ECU/sensor signal:
 ```cpp
-currentRPM = map(rpmValue, 0, 1023, 0, 3000); // Maps to 0-3000 RPM
+const int pulsesPerRevolution = 1; // Typically 1-4 for ECU signals
+```
+
+The system calculates RPM from digital pulse trains using interrupt-based counting:
+```cpp
+// RPM = (pulse_count * 60) / (time_interval_in_seconds * pulses_per_revolution)
+currentRPM = (currentPulseCount * 60000.0) / (timeDelta * pulsesPerRevolution);
 ```
 
 ## Troubleshooting

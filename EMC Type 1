@@ -7,7 +7,7 @@
 // automatic sensor inputs, PID control, and LED feedback
 
 // ===== Pin Definitions =====
-const int rpmSensorPin = A0;        // Analog pin for RPM sensor/potentiometer
+const int rpmSensorPin = 3;         // Digital pin for RPM sensor pulse train (interrupt pin)
 const int potentiometerPin = A1;    // Additional potentiometer input
 const int servoPin = 9;             // PWM pin for servo motor control
 const int armLightPin = 13;         // LED pin for arming light (built-in LED)
@@ -15,8 +15,14 @@ const int armSwitchPin = 2;         // Digital pin for arm switch
 
 
 // ===== Global Variables =====
+// RPM pulse counting variables (volatile for ISR)
+volatile unsigned long pulseCount = 0;
+volatile unsigned long lastPulseTime = 0;
+unsigned long lastRPMCalculation = 0;
+const unsigned long rpmCalculationInterval = 1000; // Calculate RPM every 1000ms
+const int pulsesPerRevolution = 1; // Assuming 1 pulse per revolution for ECU signal
+
 // Sensor readings
-int rpmValue = 0;
 int potValue = 0;
 bool armSwitch = false;
 
@@ -48,11 +54,16 @@ void setup() {
   Serial.begin(9600);
   
   // Initialize pin modes
-  pinMode(rpmSensorPin, INPUT);
+  pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
   pinMode(potentiometerPin, INPUT);
   pinMode(armLightPin, OUTPUT);
   pinMode(armSwitchPin, INPUT_PULLUP);
 
+  // Setup interrupt for RPM pulse counting (falling edge detection)
+  attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulseISR, FALLING);
+  
+  // Initialize timing variables
+  lastRPMCalculation = millis();
   
   // Initialize servo
   clutchServo.attach(servoPin);
@@ -70,6 +81,7 @@ void setup() {
   
   // Print startup message
   Serial.println("=== EMC Type 1 Controller Initialized ===");
+  Serial.println("RPM Input: Digital pulse train on pin 3 (interrupt)");
   Serial.println("Commands:");
   Serial.println("  setrpm <value>     - Set target RPM");
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
@@ -115,10 +127,32 @@ void loop() {
 
 // ===== Function Implementations =====
 
+// Interrupt Service Routine for RPM pulse counting
+void rpmPulseISR() {
+  pulseCount++;
+  lastPulseTime = micros();
+}
+
 void readSensors() {
-  // Read RPM sensor (convert analog value to RPM)
-  rpmValue = analogRead(rpmSensorPin);
-  currentRPM = map(rpmValue, 0, 1023, 0, 3000); // Map to 0-3000 RPM range
+  // Calculate RPM from pulse count over time interval
+  unsigned long currentTime = millis();
+  
+  if (currentTime - lastRPMCalculation >= rpmCalculationInterval) {
+    // Calculate RPM: (pulses * 60 seconds) / (time_interval_in_seconds * pulses_per_revolution)
+    unsigned long timeDelta = currentTime - lastRPMCalculation;
+    
+    noInterrupts(); // Disable interrupts while reading volatile variables
+    unsigned long currentPulseCount = pulseCount;
+    pulseCount = 0; // Reset pulse count for next interval
+    interrupts(); // Re-enable interrupts
+    
+    // Calculate RPM
+    if (timeDelta > 0) {
+      currentRPM = (currentPulseCount * 60000.0) / (timeDelta * pulsesPerRevolution);
+    }
+    
+    lastRPMCalculation = currentTime;
+  }
   
   // Read potentiometer
   potValue = analogRead(potentiometerPin);
@@ -258,8 +292,15 @@ void printStatus() {
 void printDetailedStatus() {
   Serial.println("=== EMC Type 1 Controller Status ===");
   Serial.println("Sensor Readings:");
-  Serial.println("  RPM Sensor Raw: " + String(rpmValue));
+  
+  // Show pulse count and frequency information
+  noInterrupts();
+  unsigned long currentPulseCount = pulseCount;
+  interrupts();
+  
+  Serial.println("  RPM Sensor: Digital pulse train on pin 3");
   Serial.println("  Current RPM: " + String(currentRPM));
+  Serial.println("  Pulse Count (current interval): " + String(currentPulseCount));
   Serial.println("  Potentiometer: " + String(potValue));
   Serial.println("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
 
