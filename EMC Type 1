@@ -199,11 +199,11 @@ void processCommand(String command) {
   
   if (command.startsWith("setrpm ")) {
     double newSetpoint = command.substring(7).toDouble();
-    if (newSetpoint > 0 && newSetpoint <= 5000) {
+    if (newSetpoint > 0 && newSetpoint <= 10000) {
       setpointRPM = newSetpoint;
       Serial.println("Target RPM set to: " + String(setpointRPM));
     } else {
-      Serial.println("Invalid RPM value. Range: 1-5000");
+      Serial.println("Invalid RPM value. Range: 1-10000");
     }
   }
   else if (command.startsWith("setpid ")) {
@@ -348,7 +348,7 @@ void printDetailedStatus() {
 
 void printHelp() {
   Serial.println("=== EMC Type 1 Controller Commands ===");
-  Serial.println("setrpm <value>     - Set target RPM (1-5000)");
+  Serial.println("setrpm <value>     - Set target RPM (1-10000)");
   Serial.println("setpid <kp> <ki> <kd> - Set PID constants");
   Serial.println("arm                - Arm system (automatic PID mode)");
   Serial.println("disarm             - Disarm system (manual control mode)");
