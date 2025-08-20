@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <PID_v1.h>
 #include <ESP32Servo.h>  // ESP32-specific servo library
+#include "BluetoothSerial.h"  // Bluetooth Classic library
 
 // ===== EMC Type 1 Controller for ESP32 =====
 // Hydraulic clutch controller with user-defined parameters,
@@ -64,6 +65,11 @@ PID myPID(&currentRPM, &pidOutput, &setpointRPM, Kp, Ki, Kd, DIRECT);
 String inputString = "";
 bool stringComplete = false;
 
+// Bluetooth communication variables
+BluetoothSerial SerialBT;
+String btInputString = "";
+bool btStringComplete = false;
+
 // Timing variables
 unsigned long lastPrintTime = 0;
 const unsigned long printInterval = 500; // Print status every 500ms
@@ -71,6 +77,10 @@ const unsigned long printInterval = 500; // Print status every 500ms
 // ===== Setup Function =====
 void setup() {
   Serial.begin(115200); // Higher baud rate for ESP32
+  
+  // Initialize Bluetooth Classic
+  SerialBT.begin("EMC_Type_1_Controller"); // Bluetooth device name
+  Serial.println("Bluetooth initialized. Device name: EMC_Type_1_Controller");
   
   // Initialize pin modes
   pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
@@ -101,12 +111,14 @@ void setup() {
   
   // Reserve string space for serial input
   inputString.reserve(200);
+  btInputString.reserve(200);
   
   // Print startup message
   Serial.println("=== EMC Type 1 Controller Initialized (ESP32) ===");
+  Serial.println("Bluetooth Device Name: EMC_Type_1_Controller");
   Serial.println("RPM Input: Digital pulse train on pin 19 (interrupt)");
   Serial.println("Manual Control: Potentiometer on pin 35");
-  Serial.println("Commands:");
+  Serial.println("Commands (via Serial or Bluetooth):");
   Serial.println("  setrpm <value>     - Set target RPM");
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
   Serial.println("  arm                - Arm the system (automatic mode)");
@@ -117,13 +129,29 @@ void setup() {
   printStatus();
 }
 
+// ===== Bluetooth Helper Functions =====
+void dualPrint(String message) {
+  Serial.print(message);
+  SerialBT.print(message);
+}
+
+void dualPrintln(String message) {
+  Serial.println(message);
+  SerialBT.println(message);
+}
+
+void dualPrintln() {
+  Serial.println();
+  SerialBT.println();
+}
+
 // ===== Main Loop =====
 void loop() {
   // Read sensor inputs
   readSensors();
   
-  // Process serial commands
-  processSerialInput();
+  // Process serial and Bluetooth commands
+  processInput();
   
   // Update system state
   updateSystemState();
@@ -188,7 +216,7 @@ void readSensors() {
 
 }
 
-void processSerialInput() {
+void processInput() {
   // Check for serial input
   while (Serial.available()) {
     char inChar = (char)Serial.read();
@@ -200,11 +228,29 @@ void processSerialInput() {
     }
   }
   
-  // Process complete command
+  // Check for Bluetooth input
+  while (SerialBT.available()) {
+    char inChar = (char)SerialBT.read();
+    
+    if (inChar == '\n') {
+      btStringComplete = true;
+    } else {
+      btInputString += inChar;
+    }
+  }
+  
+  // Process complete serial command
   if (stringComplete) {
     processCommand(inputString);
     inputString = "";
     stringComplete = false;
+  }
+  
+  // Process complete Bluetooth command
+  if (btStringComplete) {
+    processCommand(btInputString);
+    btInputString = "";
+    btStringComplete = false;
   }
 }
 
@@ -216,9 +262,9 @@ void processCommand(String command) {
     double newSetpoint = command.substring(7).toDouble();
     if (newSetpoint > 0 && newSetpoint <= 10000) {
       setpointRPM = newSetpoint;
-      Serial.println("Target RPM set to: " + String(setpointRPM));
+      dualPrintln("Target RPM set to: " + String(setpointRPM));
     } else {
-      Serial.println("Invalid RPM value. Range: 1-10000");
+      dualPrintln("Invalid RPM value. Range: 1-10000");
     }
   }
   else if (command.startsWith("setpid ")) {
@@ -236,24 +282,24 @@ void processCommand(String command) {
         Ki = newKi;
         Kd = newKd;
         myPID.SetTunings(Kp, Ki, Kd);
-        Serial.println("PID constants updated:");
-        Serial.println("  Kp: " + String(Kp));
-        Serial.println("  Ki: " + String(Ki));
-        Serial.println("  Kd: " + String(Kd));
+        dualPrintln("PID constants updated:");
+        dualPrintln("  Kp: " + String(Kp));
+        dualPrintln("  Ki: " + String(Ki));
+        dualPrintln("  Kd: " + String(Kd));
       } else {
-        Serial.println("Invalid PID values. Must be non-negative.");
+        dualPrintln("Invalid PID values. Must be non-negative.");
       }
     } else {
-      Serial.println("Usage: setpid <kp> <ki> <kd>");
+      dualPrintln("Usage: setpid <kp> <ki> <kd>");
     }
   }
   else if (command == "arm") {
     systemArmed = true;
-    Serial.println("System ARMED - Automatic PID Control Mode");
+    dualPrintln("System ARMED - Automatic PID Control Mode");
   }
   else if (command == "disarm") {
     systemArmed = false;
-    Serial.println("System DISARMED - Manual Control Mode");
+    dualPrintln("System DISARMED - Manual Control Mode");
   }
   else if (command == "status") {
     printDetailedStatus();
@@ -262,8 +308,8 @@ void processCommand(String command) {
     printHelp();
   }
   else {
-    Serial.println("Unknown command: " + command);
-    Serial.println("Type 'help' for available commands.");
+    dualPrintln("Unknown command: " + command);
+    dualPrintln("Type 'help' for available commands.");
   }
 }
 
@@ -273,11 +319,11 @@ void updateSystemState() {
   
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
-    Serial.println("System ARMED via switch - Automatic PID Control Mode");
+    dualPrintln("System ARMED via switch - Automatic PID Control Mode");
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
-    Serial.println("System DISARMED via switch - Manual Control Mode");
+    dualPrintln("System DISARMED via switch - Manual Control Mode");
   }
 }
 
@@ -315,63 +361,63 @@ void updateOutputs() {
 }
 
 void printStatus() {
-  Serial.print("RPM: ");
-  Serial.print(currentRPM);
-  Serial.print(" | Target: ");
-  Serial.print(setpointRPM);
-  Serial.print(" | Servo: ");
-  Serial.print(servoPosition);
-  Serial.print("° | Mode: ");
-  Serial.print(systemArmed ? "AUTO" : "MANUAL");
-  Serial.print(" | PID Out: ");
-  Serial.println(pidOutput);
+  dualPrint("RPM: ");
+  dualPrint(String(currentRPM));
+  dualPrint(" | Target: ");
+  dualPrint(String(setpointRPM));
+  dualPrint(" | Servo: ");
+  dualPrint(String(servoPosition));
+  dualPrint("° | Mode: ");
+  dualPrint(systemArmed ? "AUTO" : "MANUAL");
+  dualPrint(" | PID Out: ");
+  dualPrintln(String(pidOutput));
 }
 
 void printDetailedStatus() {
-  Serial.println("=== EMC Type 1 Controller Status ===");
-  Serial.println("Sensor Readings:");
+  dualPrintln("=== EMC Type 1 Controller Status ===");
+  dualPrintln("Sensor Readings:");
   
   // Show pulse count and frequency information
   noInterrupts();
   unsigned long currentPulseCount = pulseCount;
   interrupts();
   
-  Serial.println("  RPM Sensor: Digital pulse train on pin 19");
-  Serial.println("  Current RPM: " + String(currentRPM));
-  Serial.println("  Pulse Count (current interval): " + String(currentPulseCount));
-  Serial.println("  Potentiometer: " + String(potValue));
-  Serial.println("  Manual Control Pot: " + String(manualPotValue));
-  Serial.println("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
+  dualPrintln("  RPM Sensor: Digital pulse train on pin 19");
+  dualPrintln("  Current RPM: " + String(currentRPM));
+  dualPrintln("  Pulse Count (current interval): " + String(currentPulseCount));
+  dualPrintln("  Potentiometer: " + String(potValue));
+  dualPrintln("  Manual Control Pot: " + String(manualPotValue));
+  dualPrintln("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
 
-  Serial.println();
+  dualPrintln();
   
-  Serial.println("Control Parameters:");
-  Serial.println("  Target RPM: " + String(setpointRPM));
-  Serial.println("  PID Kp: " + String(Kp));
-  Serial.println("  PID Ki: " + String(Ki));
-  Serial.println("  PID Kd: " + String(Kd));
-  Serial.println();
+  dualPrintln("Control Parameters:");
+  dualPrintln("  Target RPM: " + String(setpointRPM));
+  dualPrintln("  PID Kp: " + String(Kp));
+  dualPrintln("  PID Ki: " + String(Ki));
+  dualPrintln("  PID Kd: " + String(Kd));
+  dualPrintln();
   
-  Serial.println("System State:");
-  Serial.println("  Mode: " + String(systemArmed ? "AUTOMATIC" : "MANUAL"));
-  Serial.println("  Armed: " + String(systemArmed ? "YES" : "NO"));
-  Serial.println("  Servo Position: " + String(servoPosition) + "°");
-  Serial.println("  PID Output: " + String(pidOutput));
-  Serial.println("  Arm Light: " + String(digitalRead(armLightPin) ? "ON" : "OFF"));
-  Serial.println("====================================");
+  dualPrintln("System State:");
+  dualPrintln("  Mode: " + String(systemArmed ? "AUTOMATIC" : "MANUAL"));
+  dualPrintln("  Armed: " + String(systemArmed ? "YES" : "NO"));
+  dualPrintln("  Servo Position: " + String(servoPosition) + "°");
+  dualPrintln("  PID Output: " + String(pidOutput));
+  dualPrintln("  Arm Light: " + String(digitalRead(armLightPin) ? "ON" : "OFF"));
+  dualPrintln("====================================");
 }
 
 void printHelp() {
-  Serial.println("=== EMC Type 1 Controller Commands ===");
-  Serial.println("setrpm <value>     - Set target RPM (1-10000)");
-  Serial.println("setpid <kp> <ki> <kd> - Set PID constants");
-  Serial.println("arm                - Arm system (automatic PID mode)");
-  Serial.println("disarm             - Disarm system (manual control mode)");
-  Serial.println("status             - Show detailed status");
-  Serial.println("help               - Show this help");
-  Serial.println("");
-  Serial.println("MODES:");
-  Serial.println("  AUTOMATIC: System armed, PID controls servo");
-  Serial.println("  MANUAL: System disarmed, pin 35 potentiometer controls servo");
-  Serial.println("=======================================");
+  dualPrintln("=== EMC Type 1 Controller Commands ===");
+  dualPrintln("setrpm <value>     - Set target RPM (1-10000)");
+  dualPrintln("setpid <kp> <ki> <kd> - Set PID constants");
+  dualPrintln("arm                - Arm system (automatic PID mode)");
+  dualPrintln("disarm             - Disarm system (manual control mode)");
+  dualPrintln("status             - Show detailed status");
+  dualPrintln("help               - Show this help");
+  dualPrintln("");
+  dualPrintln("MODES:");
+  dualPrintln("  AUTOMATIC: System armed, PID controls servo");
+  dualPrintln("  MANUAL: System disarmed, pin 35 potentiometer controls servo");
+  dualPrintln("=======================================");
 }
