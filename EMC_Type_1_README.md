@@ -22,8 +22,12 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 
 ### 4. Visual Feedback
 - **Arming Light**: LED indicator on Pin 13 (built-in LED)
-- **System Status**: Solid on when armed, solid off when disarmed
+- **System Status**: Solid on when armed (automatic mode), flashing when disarmed (manual mode)
 - **Serial Monitor**: Comprehensive status reporting and command interface
+
+### 5. Dual Control Modes
+- **Manual Mode**: When disarmed, potentiometer on Pin A2 directly controls servo position (0-180°)
+- **Automatic Mode**: When armed, PID controller automatically adjusts servo based on RPM feedback
 
 ## Hardware Connections
 
@@ -31,6 +35,7 @@ The EMC Type 1 controller is an Arduino Uno-based hydraulic clutch controller sp
 ```
 Pin 3   - RPM Sensor Digital Pulse Train Input (Interrupt)
 Pin A1  - Secondary Potentiometer Input
+Pin A2  - Manual Servo Control Potentiometer
 Pin 2   - Arm Switch (Active LOW with internal pullup)
 Pin 9   - Servo Motor PWM Output
 Pin 13  - Arming Light LED (Built-in LED)
@@ -41,6 +46,7 @@ Pin 13  - Arming Light LED (Built-in LED)
 - Servo motor (for clutch actuation)
 - Digital RPM sensor or ECU with pulse train output
 - Push button for arm switch
+- Potentiometer for manual servo control (connected to Pin A2)
 - LED (optional, built-in LED used by default)
 - PID_v1 Arduino Library
 - Servo Arduino Library
@@ -52,8 +58,8 @@ The system accepts the following commands via the Serial Monitor (9600 baud):
 ### Basic Commands
 - `help` - Display available commands
 - `status` - Show detailed system status
-- `arm` - Arm the system
-- `disarm` - Disarm the system
+- `arm` - Arm the system (enables automatic PID control mode)
+- `disarm` - Disarm the system (enables manual control mode)
 
 ### Configuration Commands
 - `setrpm <value>` - Set target RPM (1-5000)
@@ -71,12 +77,14 @@ The system accepts the following commands via the Serial Monitor (9600 baud):
 
 ### Normal Operation
 1. **Sensor Reading**: System continuously reads RPM sensor and switches
-2. **PID Control**: When armed, PID controller adjusts servo position to maintain target RPM
-3. **Visual Feedback**: Arming light remains solid on when system is armed
+2. **Manual Mode**: When disarmed, potentiometer on A2 directly controls servo position (flashing LED)
+3. **Automatic Mode**: When armed, PID controller adjusts servo position to maintain target RPM (solid LED)
 4. **Serial Output**: Status information displayed every 500ms
 
 ### Safety Features
-- System returns servo to neutral position (90°) when disarmed
+- Manual mode allows safe servo positioning when system is disarmed
+- Automatic mode provides precise RPM control when system is armed
+- Smooth transition between manual and automatic modes
 - Dual arming methods: physical switch or serial command
 - Input validation for all serial commands
 - Real-time status monitoring
@@ -100,7 +108,7 @@ PID constants updated:
 
 ### Status Monitoring
 ```
-RPM: 1180 | Target: 1200 | Servo: 95° | Armed: YES | PID Out: 95.00
+RPM: 1180 | Target: 1200 | Servo: 95° | Mode: AUTO | PID Out: 95.00
 ```
 
 ## Dependencies
@@ -126,6 +134,7 @@ RPM: 1180 | Target: 1200 | Servo: 95° | Armed: YES | PID Out: 95.00
 Modify the pin definitions at the top of the code to match your hardware setup:
 ```cpp
 const int rpmSensorPin = 3;         // Digital interrupt pin for pulse train
+const int manualPotPin = A2;        // Manual servo control potentiometer
 const int servoPin = 9;             // PWM-capable pin required
 const int armLightPin = 13;         // Any digital pin
 ```
@@ -147,6 +156,21 @@ The system calculates RPM from digital pulse trains using interrupt-based counti
 // RPM = (pulse_count * 60) / (time_interval_in_seconds * pulses_per_revolution)
 currentRPM = (currentPulseCount * 60000.0) / (timeDelta * pulsesPerRevolution);
 ```
+
+### Manual/Automatic Mode Configuration
+The system operates in two distinct modes:
+
+**Manual Mode (Disarmed)**:
+- Potentiometer on Pin A2 directly controls servo position
+- Range: 0-1023 analog input maps to 0-180° servo position
+- LED flashes to indicate manual mode
+- No PID control active
+
+**Automatic Mode (Armed)**:
+- PID controller maintains target RPM by adjusting servo
+- Manual potentiometer input ignored
+- LED solid on to indicate automatic mode
+- Full PID control loop active
 
 ## Troubleshooting
 

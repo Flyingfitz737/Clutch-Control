@@ -9,6 +9,7 @@
 // ===== Pin Definitions =====
 const int rpmSensorPin = 3;         // Digital pin for RPM sensor pulse train (interrupt pin)
 const int potentiometerPin = A1;    // Additional potentiometer input
+const int manualPotPin = A2;        // Manual servo control potentiometer
 const int servoPin = 9;             // PWM pin for servo motor control
 const int armLightPin = 13;         // LED pin for arming light (built-in LED)
 const int armSwitchPin = 2;         // Digital pin for arm switch
@@ -24,9 +25,15 @@ const int pulsesPerRevolution = 1; // Assuming 1 pulse per revolution for ECU si
 
 // Sensor readings
 int potValue = 0;
+int manualPotValue = 0;
 bool armSwitch = false;
 
 bool systemArmed = false;
+
+// LED flashing variables for manual mode
+unsigned long lastLEDFlash = 0;
+const unsigned long ledFlashInterval = 500; // Flash every 500ms
+bool ledState = false;
 
 // PID Control Variables
 double setpointRPM = 1000.0;        // Target RPM (user-configurable)
@@ -56,6 +63,7 @@ void setup() {
   // Initialize pin modes
   pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
   pinMode(potentiometerPin, INPUT);
+  pinMode(manualPotPin, INPUT);
   pinMode(armLightPin, OUTPUT);
   pinMode(armSwitchPin, INPUT_PULLUP);
 
@@ -82,11 +90,12 @@ void setup() {
   // Print startup message
   Serial.println("=== EMC Type 1 Controller Initialized ===");
   Serial.println("RPM Input: Digital pulse train on pin 3 (interrupt)");
+  Serial.println("Manual Control: Potentiometer on pin A2");
   Serial.println("Commands:");
   Serial.println("  setrpm <value>     - Set target RPM");
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
-  Serial.println("  arm                - Arm the system");
-  Serial.println("  disarm             - Disarm the system");
+  Serial.println("  arm                - Arm the system (automatic mode)");
+  Serial.println("  disarm             - Disarm the system (manual mode)");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
   Serial.println("========================================");
@@ -104,13 +113,12 @@ void loop() {
   // Update system state
   updateSystemState();
   
-  // Run PID control if armed
+  // Run PID control if armed (automatic mode)
   if (systemArmed) {
     runPIDControl();
   } else {
-    // Return servo to neutral position when disarmed
-    servoPosition = 90;
-    clutchServo.write(servoPosition);
+    // Manual servo control when disarmed
+    runManualControl();
   }
   
   // Update outputs
@@ -156,6 +164,9 @@ void readSensors() {
   
   // Read potentiometer
   potValue = analogRead(potentiometerPin);
+  
+  // Read manual control potentiometer
+  manualPotValue = analogRead(manualPotPin);
   
   // Read digital switches (active LOW with pullup)
   armSwitch = !digitalRead(armSwitchPin);
@@ -223,11 +234,11 @@ void processCommand(String command) {
   }
   else if (command == "arm") {
     systemArmed = true;
-    Serial.println("System ARMED");
+    Serial.println("System ARMED - Automatic PID Control Mode");
   }
   else if (command == "disarm") {
     systemArmed = false;
-    Serial.println("System DISARMED");
+    Serial.println("System DISARMED - Manual Control Mode");
   }
   else if (command == "status") {
     printDetailedStatus();
@@ -247,11 +258,11 @@ void updateSystemState() {
   
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
-    Serial.println("System ARMED via switch");
+    Serial.println("System ARMED via switch - Automatic PID Control Mode");
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
-    Serial.println("System DISARMED via switch");
+    Serial.println("System DISARMED via switch - Manual Control Mode");
   }
 }
 
@@ -265,14 +276,26 @@ void runPIDControl() {
   }
 }
 
+void runManualControl() {
+  // Map potentiometer value (0-1023) to servo position (0-180 degrees)
+  servoPosition = map(manualPotValue, 0, 1023, 0, 180);
+  servoPosition = constrain(servoPosition, 0, 180);
+  clutchServo.write(servoPosition);
+}
+
 void updateOutputs() {
-  // Update arm light - solid on when armed, solid off when disarmed
+  // Update arm light - solid on when armed (automatic), flashing when disarmed (manual)
   if (systemArmed) {
-    // Solid on when armed
+    // Solid on when armed (automatic mode)
     digitalWrite(armLightPin, HIGH);
   } else {
-    // Solid off when disarmed
-    digitalWrite(armLightPin, LOW);
+    // Flashing when disarmed (manual mode)
+    unsigned long currentTime = millis();
+    if (currentTime - lastLEDFlash >= ledFlashInterval) {
+      ledState = !ledState;
+      digitalWrite(armLightPin, ledState);
+      lastLEDFlash = currentTime;
+    }
   }
 }
 
@@ -283,8 +306,8 @@ void printStatus() {
   Serial.print(setpointRPM);
   Serial.print(" | Servo: ");
   Serial.print(servoPosition);
-  Serial.print("° | Armed: ");
-  Serial.print(systemArmed ? "YES" : "NO");
+  Serial.print("° | Mode: ");
+  Serial.print(systemArmed ? "AUTO" : "MANUAL");
   Serial.print(" | PID Out: ");
   Serial.println(pidOutput);
 }
@@ -302,6 +325,7 @@ void printDetailedStatus() {
   Serial.println("  Current RPM: " + String(currentRPM));
   Serial.println("  Pulse Count (current interval): " + String(currentPulseCount));
   Serial.println("  Potentiometer: " + String(potValue));
+  Serial.println("  Manual Control Pot: " + String(manualPotValue));
   Serial.println("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
 
   Serial.println();
@@ -314,6 +338,7 @@ void printDetailedStatus() {
   Serial.println();
   
   Serial.println("System State:");
+  Serial.println("  Mode: " + String(systemArmed ? "AUTOMATIC" : "MANUAL"));
   Serial.println("  Armed: " + String(systemArmed ? "YES" : "NO"));
   Serial.println("  Servo Position: " + String(servoPosition) + "°");
   Serial.println("  PID Output: " + String(pidOutput));
@@ -325,9 +350,13 @@ void printHelp() {
   Serial.println("=== EMC Type 1 Controller Commands ===");
   Serial.println("setrpm <value>     - Set target RPM (1-5000)");
   Serial.println("setpid <kp> <ki> <kd> - Set PID constants");
-  Serial.println("arm                - Arm the system");
-  Serial.println("disarm             - Disarm the system");
+  Serial.println("arm                - Arm system (automatic PID mode)");
+  Serial.println("disarm             - Disarm system (manual control mode)");
   Serial.println("status             - Show detailed status");
   Serial.println("help               - Show this help");
+  Serial.println("");
+  Serial.println("MODES:");
+  Serial.println("  AUTOMATIC: System armed, PID controls servo");
+  Serial.println("  MANUAL: System disarmed, A2 potentiometer controls servo");
   Serial.println("=======================================");
 }
