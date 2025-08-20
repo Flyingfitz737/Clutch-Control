@@ -1,18 +1,30 @@
 #include <Arduino.h>
 #include <PID_v1.h>
-#include <Servo.h>
+#include <ESP32Servo.h>  // ESP32-specific servo library
 
-// ===== EMC Type 1 Controller for Arduino Uno =====
+// ===== EMC Type 1 Controller for ESP32 =====
 // Hydraulic clutch controller with user-defined parameters,
 // automatic sensor inputs, PID control, and LED feedback
+//
+// Required Libraries for ESP32:
+// - PID_v1 (Arduino IDE Library Manager)
+// - ESP32Servo (Arduino IDE Library Manager)
+//
+// Hardware Requirements:
+// - ESP32 development board
+// - RPM sensor connected to GPIO19
+// - Potentiometers connected to GPIO34 and GPIO35
+// - Servo motor connected to GPIO18
+// - Arm switch connected to GPIO21
+// - LED connected to GPIO2 (or use built-in LED)
 
 // ===== Pin Definitions =====
-const int rpmSensorPin = 3;         // Digital pin for RPM sensor pulse train (interrupt pin)
-const int potentiometerPin = A1;    // Additional potentiometer input
-const int manualPotPin = A2;        // Manual servo control potentiometer
-const int servoPin = 9;             // PWM pin for servo motor control
-const int armLightPin = 13;         // LED pin for arming light (built-in LED)
-const int armSwitchPin = 2;         // Digital pin for arm switch
+const int rpmSensorPin = 19;        // Digital pin for RPM sensor pulse train (interrupt capable)
+const int potentiometerPin = 34;    // Analog input for additional potentiometer (ADC1_CH6)
+const int manualPotPin = 35;        // Analog input for manual servo control potentiometer (ADC1_CH7)
+const int servoPin = 18;            // PWM pin for servo motor control
+const int armLightPin = 2;          // LED pin for arming light (built-in LED on ESP32)
+const int armSwitchPin = 21;        // Digital pin for arm switch
 
 
 // ===== Global Variables =====
@@ -58,7 +70,7 @@ const unsigned long printInterval = 500; // Print status every 500ms
 
 // ===== Setup Function =====
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200); // Higher baud rate for ESP32
   
   // Initialize pin modes
   pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
@@ -66,6 +78,9 @@ void setup() {
   pinMode(manualPotPin, INPUT);
   pinMode(armLightPin, OUTPUT);
   pinMode(armSwitchPin, INPUT_PULLUP);
+
+  // Configure ADC resolution for ESP32 (12-bit by default)
+  analogReadResolution(12); // ESP32 supports 12-bit ADC (0-4095)
 
   // Setup interrupt for RPM pulse counting (falling edge detection)
   attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulseISR, FALLING);
@@ -88,9 +103,9 @@ void setup() {
   inputString.reserve(200);
   
   // Print startup message
-  Serial.println("=== EMC Type 1 Controller Initialized ===");
-  Serial.println("RPM Input: Digital pulse train on pin 3 (interrupt)");
-  Serial.println("Manual Control: Potentiometer on pin A2");
+  Serial.println("=== EMC Type 1 Controller Initialized (ESP32) ===");
+  Serial.println("RPM Input: Digital pulse train on pin 19 (interrupt)");
+  Serial.println("Manual Control: Potentiometer on pin 35");
   Serial.println("Commands:");
   Serial.println("  setrpm <value>     - Set target RPM");
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
@@ -277,8 +292,8 @@ void runPIDControl() {
 }
 
 void runManualControl() {
-  // Map potentiometer value (0-1023) to servo position (0-180 degrees)
-  servoPosition = map(manualPotValue, 0, 1023, 0, 180);
+  // Map potentiometer value (0-4095 for ESP32 12-bit ADC) to servo position (0-180 degrees)
+  servoPosition = map(manualPotValue, 0, 4095, 0, 180);
   servoPosition = constrain(servoPosition, 0, 180);
   clutchServo.write(servoPosition);
 }
@@ -321,7 +336,7 @@ void printDetailedStatus() {
   unsigned long currentPulseCount = pulseCount;
   interrupts();
   
-  Serial.println("  RPM Sensor: Digital pulse train on pin 3");
+  Serial.println("  RPM Sensor: Digital pulse train on pin 19");
   Serial.println("  Current RPM: " + String(currentRPM));
   Serial.println("  Pulse Count (current interval): " + String(currentPulseCount));
   Serial.println("  Potentiometer: " + String(potValue));
@@ -357,6 +372,6 @@ void printHelp() {
   Serial.println("");
   Serial.println("MODES:");
   Serial.println("  AUTOMATIC: System armed, PID controls servo");
-  Serial.println("  MANUAL: System disarmed, A2 potentiometer controls servo");
+  Serial.println("  MANUAL: System disarmed, pin 35 potentiometer controls servo");
   Serial.println("=======================================");
 }
