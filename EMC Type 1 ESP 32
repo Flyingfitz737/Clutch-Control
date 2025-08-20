@@ -5,6 +5,18 @@
 // ===== EMC Type 1 Controller for ESP32 =====
 // Hydraulic clutch controller with user-defined parameters,
 // automatic sensor inputs, PID control, and LED feedback
+//
+// Required Libraries for ESP32:
+// - PID_v1 (Arduino IDE Library Manager)
+// - ESP32Servo (Arduino IDE Library Manager)
+//
+// Hardware Requirements:
+// - ESP32 development board
+// - RPM sensor connected to GPIO19
+// - Potentiometers connected to GPIO34 and GPIO35
+// - Servo motor connected to GPIO18
+// - Arm switch connected to GPIO21
+// - LED connected to GPIO2 (or use built-in LED)
 
 // ===== Pin Definitions =====
 const int rpmSensorPin = 19;        // Digital pin for RPM sensor pulse train (interrupt capable)
