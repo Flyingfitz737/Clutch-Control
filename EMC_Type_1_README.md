@@ -42,13 +42,19 @@ The main features and components of the code are:
 - The PID algorithm ensures the system maintains the desired RPM by minimizing the error between the setpoint and the current RPM.
 - Constants (`Kp`, `Ki`, `Kd`) are user-configurable to fine-tune the control system’s responsiveness.
 
-### **Commands via Serial Communication**
-The controller can accept the following commands:
+### **Commands via Serial and Bluetooth Communication**
+The controller can accept the following commands via both Serial Monitor and Bluetooth Classic connection:
 - **`setrpm <value>`**: Sets the target RPM.
 - **`setpid <kp> <ki> <kd>`**: Configures PID constants.
 - **`arm` / `disarm`**: Toggles between automatic and manual modes.
 - **`status`**: Displays the current system status.
 - **`help`**: Lists available commands and their descriptions.
+
+### **Bluetooth Classic Integration (ESP32 Version)**
+- **Device Name**: `EMC_Type_1_Controller`
+- **Functionality**: Full command support and real-time status feedback
+- **Compatibility**: Works alongside existing Serial communication
+- **Range**: Standard Bluetooth Classic range (~10 meters typical)
 
 ### **Interrupts**
 - The RPM sensor uses an interrupt service routine (ISR) to count pulses and calculate RPM in real-time.
@@ -60,8 +66,9 @@ The controller can accept the following commands:
   - Runs PID or manual control logic based on the mode.
   - Outputs updated signals to the servo and LED.
 
-### **Serial Feedback**
-- The controller provides real-time feedback via the Serial Monitor, including RPM readings, PID outputs, and system states.
+### **Real-time Feedback**
+- The controller provides real-time feedback via both the Serial Monitor and Bluetooth connection, including RPM readings, PID outputs, and system states.
+- **ESP32 Version**: Simultaneous feedback over Serial and Bluetooth Classic for remote monitoring and control.
 
 ### **Safety and Stability**
 - Includes safeguards such as:
