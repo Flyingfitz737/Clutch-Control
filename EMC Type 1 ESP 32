@@ -2,6 +2,7 @@
 #include <PID_v1.h>
 #include <ESP32Servo.h>  // ESP32-specific servo library
 #include "BluetoothSerial.h"  // Bluetooth Classic library
+#include <EEPROM.h>  // For persistent calibration storage
 
 // ===== EMC Type 1 Controller for ESP32 =====
 // Hydraulic clutch controller with user-defined parameters,
@@ -33,6 +34,22 @@ const int servoPin = 18;            // PWM pin for servo motor control
 const int armLightPin = 2;          // LED pin for arming light (built-in LED on ESP32)
 const int armSwitchPin = 21;        // Digital pin for arm switch
 
+// ===== Calibration Data Structure =====
+struct CalibrationData {
+  int minPosition = 0;      // Minimum servo position (0-180)
+  int maxPosition = 180;    // Maximum servo position (0-180)
+  int neutralPosition = 90; // Neutral/default servo position (0-180)
+  bool direction = true;    // Servo direction: true = normal, false = reversed
+  bool isValid = false;     // Flag to indicate if calibration data is valid
+};
+
+// EEPROM address for calibration data
+const int EEPROM_SIZE = 512;
+const int CALIBRATION_ADDR = 0;
+
+// Global calibration data
+CalibrationData calibration;
+
 
 // ===== Global Variables =====
 // RPM pulse counting variables (volatile for ISR)
@@ -62,7 +79,7 @@ double Kp = 2.0, Ki = 5.0, Kd = 1.0; // PID constants (user-configurable)
 
 // Servo control
 Servo clutchServo;
-int servoPosition = 90;             // Servo position (0-180 degrees)
+int servoPosition = 90;             // Current servo position (0-180 degrees)
 
 // PID Controller
 PID myPID(&currentRPM, &pidOutput, &setpointRPM, Kp, Ki, Kd, DIRECT);
@@ -84,6 +101,12 @@ const unsigned long printInterval = 500; // Print status every 500ms
 void setup() {
   Serial.begin(115200); // Higher baud rate for ESP32
   
+  // Initialize EEPROM
+  EEPROM.begin(EEPROM_SIZE);
+  
+  // Load calibration data from EEPROM
+  loadCalibrationData();
+  
   // Initialize Bluetooth Classic
   SerialBT.begin("EMC_Type_1_Controller"); // Bluetooth device name
   Serial.println("Bluetooth initialized. Device name: EMC_Type_1_Controller");
@@ -104,13 +127,14 @@ void setup() {
   // Initialize timing variables
   lastRPMCalculation = millis();
   
-  // Initialize servo
+  // Initialize servo with neutral position from calibration
   clutchServo.attach(servoPin);
+  servoPosition = calibration.neutralPosition;
   clutchServo.write(servoPosition);
   
-  // Initialize PID controller
+  // Initialize PID controller with calibrated output limits
   myPID.SetMode(AUTOMATIC);
-  myPID.SetOutputLimits(0, 180); // Servo range 0-180 degrees
+  myPID.SetOutputLimits(calibration.minPosition, calibration.maxPosition);
   
   // Initialize outputs
   digitalWrite(armLightPin, LOW);
@@ -127,6 +151,10 @@ void setup() {
   Serial.println("Commands (via Serial or Bluetooth):");
   Serial.println("  setrpm <value>     - Set target RPM");
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
+  Serial.println("  calibrate set_min <value> - Set minimum servo position");
+  Serial.println("  calibrate set_max <value> - Set maximum servo position");
+  Serial.println("  calibrate set_neutral <value> - Set neutral servo position");
+  Serial.println("  calibrate direction <normal|reversed> - Set servo direction");
   Serial.println("  arm                - Arm the system (automatic mode)");
   Serial.println("  disarm             - Disarm the system (manual mode)");
   Serial.println("  status             - Show current status");
@@ -183,6 +211,62 @@ void loop() {
 }
 
 // ===== Function Implementations =====
+
+// ===== Calibration Functions =====
+void saveCalibrationData() {
+  calibration.isValid = true;
+  EEPROM.put(CALIBRATION_ADDR, calibration);
+  EEPROM.commit();
+  dualPrintln("Calibration data saved to EEPROM");
+}
+
+void loadCalibrationData() {
+  EEPROM.get(CALIBRATION_ADDR, calibration);
+  
+  // Check if calibration data is valid, if not use defaults
+  if (!calibration.isValid || 
+      calibration.minPosition < 0 || calibration.minPosition > 180 ||
+      calibration.maxPosition < 0 || calibration.maxPosition > 180 ||
+      calibration.neutralPosition < 0 || calibration.neutralPosition > 180 ||
+      calibration.minPosition >= calibration.maxPosition) {
+    
+    // Use default calibration values
+    calibration.minPosition = 0;
+    calibration.maxPosition = 180;
+    calibration.neutralPosition = 90;
+    calibration.direction = true;
+    calibration.isValid = true;
+    
+    // Save defaults to EEPROM
+    saveCalibrationData();
+    Serial.println("Using default calibration values");
+  } else {
+    Serial.println("Loaded calibration data from EEPROM");
+  }
+}
+
+int applyCalibration(int position) {
+  // Constrain position within calibrated limits
+  position = constrain(position, calibration.minPosition, calibration.maxPosition);
+  
+  // Apply direction reversal if needed
+  if (!calibration.direction) {
+    // Reverse direction: map position from calibrated range to reversed range
+    position = calibration.maxPosition - (position - calibration.minPosition);
+  }
+  
+  return position;
+}
+
+void moveServoToPosition(int position) {
+  // Apply calibration and move servo
+  int calibratedPosition = applyCalibration(position);
+  servoPosition = calibratedPosition;
+  clutchServo.write(servoPosition);
+  
+  // Provide real-time feedback
+  dualPrintln("Servo moved to position: " + String(position) + "° (calibrated: " + String(calibratedPosition) + "°)");
+}
 
 // Interrupt Service Routine for RPM pulse counting
 void rpmPulseISR() {
@@ -302,13 +386,88 @@ void processCommand(String command) {
   else if (command == "arm") {
     systemArmed = true;
     dualPrintln("System ARMED - Automatic PID Control Mode");
+    // Move to neutral position when arming
+    moveServoToPosition(calibration.neutralPosition);
   }
   else if (command == "disarm") {
     systemArmed = false;
     dualPrintln("System DISARMED - Manual Control Mode");
+    // Move to neutral position when disarming
+    moveServoToPosition(calibration.neutralPosition);
   }
   else if (command == "status") {
     printDetailedStatus();
+  }
+  else if (command.startsWith("calibrate ")) {
+    // Handle calibration commands
+    String subCommand = command.substring(10);
+    subCommand.trim();
+    
+    if (subCommand.startsWith("set_min ")) {
+      int value = subCommand.substring(8).toInt();
+      if (value >= 0 && value <= 180 && value < calibration.maxPosition) {
+        calibration.minPosition = value;
+        moveServoToPosition(value);
+        saveCalibrationData();
+        // Update PID output limits
+        myPID.SetOutputLimits(calibration.minPosition, calibration.maxPosition);
+        dualPrintln("Minimum position set to: " + String(value) + "°");
+      } else {
+        dualPrintln("Invalid minimum position. Must be 0-180 and less than max position (" + String(calibration.maxPosition) + "°)");
+      }
+    }
+    else if (subCommand.startsWith("set_max ")) {
+      int value = subCommand.substring(8).toInt();
+      if (value >= 0 && value <= 180 && value > calibration.minPosition) {
+        calibration.maxPosition = value;
+        moveServoToPosition(value);
+        saveCalibrationData();
+        // Update PID output limits
+        myPID.SetOutputLimits(calibration.minPosition, calibration.maxPosition);
+        dualPrintln("Maximum position set to: " + String(value) + "°");
+      } else {
+        dualPrintln("Invalid maximum position. Must be 0-180 and greater than min position (" + String(calibration.minPosition) + "°)");
+      }
+    }
+    else if (subCommand.startsWith("set_neutral ")) {
+      int value = subCommand.substring(12).toInt();
+      if (value >= calibration.minPosition && value <= calibration.maxPosition) {
+        calibration.neutralPosition = value;
+        moveServoToPosition(value);
+        saveCalibrationData();
+        dualPrintln("Neutral position set to: " + String(value) + "°");
+      } else {
+        dualPrintln("Invalid neutral position. Must be between min (" + String(calibration.minPosition) + "°) and max (" + String(calibration.maxPosition) + "°)");
+      }
+    }
+    else if (subCommand.startsWith("direction ")) {
+      String direction = subCommand.substring(10);
+      direction.trim();
+      direction.toLowerCase();
+      
+      if (direction == "normal") {
+        calibration.direction = true;
+        saveCalibrationData();
+        dualPrintln("Servo direction set to: NORMAL");
+        // Move to neutral to show direction change
+        moveServoToPosition(calibration.neutralPosition);
+      } else if (direction == "reversed") {
+        calibration.direction = false;
+        saveCalibrationData();
+        dualPrintln("Servo direction set to: REVERSED");
+        // Move to neutral to show direction change
+        moveServoToPosition(calibration.neutralPosition);
+      } else {
+        dualPrintln("Invalid direction. Use 'normal' or 'reversed'");
+      }
+    }
+    else {
+      dualPrintln("Unknown calibration command. Available:");
+      dualPrintln("  calibrate set_min <value>     - Set minimum position (0-180)");
+      dualPrintln("  calibrate set_max <value>     - Set maximum position (0-180)");
+      dualPrintln("  calibrate set_neutral <value> - Set neutral position");
+      dualPrintln("  calibrate direction <normal|reversed> - Set direction");
+    }
   }
   else if (command == "help") {
     printHelp();
@@ -326,27 +485,31 @@ void updateSystemState() {
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
     dualPrintln("System ARMED via switch - Automatic PID Control Mode");
+    // Move to neutral position when arming
+    moveServoToPosition(calibration.neutralPosition);
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
     dualPrintln("System DISARMED via switch - Manual Control Mode");
+    // Move to neutral position when disarming
+    moveServoToPosition(calibration.neutralPosition);
   }
 }
 
 void runPIDControl() {
   // Compute PID output
   if (myPID.Compute()) {
-    // Map PID output to servo position
-    servoPosition = (int)pidOutput;
-    servoPosition = constrain(servoPosition, 0, 180);
+    // Map PID output to servo position (PID output limits are already set to calibrated range)
+    int targetPosition = (int)pidOutput;
+    servoPosition = applyCalibration(targetPosition);
     clutchServo.write(servoPosition);
   }
 }
 
 void runManualControl() {
-  // Map potentiometer value (0-4095 for ESP32 12-bit ADC) to servo position (0-180 degrees)
-  servoPosition = map(manualPotValue, 0, 4095, 0, 180);
-  servoPosition = constrain(servoPosition, 0, 180);
+  // Map potentiometer value (0-4095 for ESP32 12-bit ADC) to calibrated servo range
+  int targetPosition = map(manualPotValue, 0, 4095, calibration.minPosition, calibration.maxPosition);
+  servoPosition = applyCalibration(targetPosition);
   clutchServo.write(servoPosition);
 }
 
@@ -404,6 +567,13 @@ void printDetailedStatus() {
   dualPrintln("  PID Kd: " + String(Kd));
   dualPrintln();
   
+  dualPrintln("Servo Calibration:");
+  dualPrintln("  Min Position: " + String(calibration.minPosition) + "°");
+  dualPrintln("  Max Position: " + String(calibration.maxPosition) + "°");
+  dualPrintln("  Neutral Position: " + String(calibration.neutralPosition) + "°");
+  dualPrintln("  Direction: " + String(calibration.direction ? "NORMAL" : "REVERSED"));
+  dualPrintln();
+  
   dualPrintln("System State:");
   dualPrintln("  Mode: " + String(systemArmed ? "AUTOMATIC" : "MANUAL"));
   dualPrintln("  Armed: " + String(systemArmed ? "YES" : "NO"));
@@ -417,13 +587,22 @@ void printHelp() {
   dualPrintln("=== EMC Type 1 Controller Commands ===");
   dualPrintln("setrpm <value>     - Set target RPM (1-10000)");
   dualPrintln("setpid <kp> <ki> <kd> - Set PID constants");
+  dualPrintln("calibrate set_min <value> - Set minimum servo position (0-180)");
+  dualPrintln("calibrate set_max <value> - Set maximum servo position (0-180)");
+  dualPrintln("calibrate set_neutral <value> - Set neutral servo position");
+  dualPrintln("calibrate direction <normal|reversed> - Set servo direction");
   dualPrintln("arm                - Arm system (automatic PID mode)");
   dualPrintln("disarm             - Disarm system (manual control mode)");
   dualPrintln("status             - Show detailed status");
   dualPrintln("help               - Show this help");
   dualPrintln("");
+  dualPrintln("CALIBRATION:");
+  dualPrintln("  Use calibration commands to set servo limits and behavior");
+  dualPrintln("  Servo moves to position in real-time for visual confirmation");
+  dualPrintln("  Settings are saved to EEPROM automatically");
+  dualPrintln("");
   dualPrintln("MODES:");
-  dualPrintln("  AUTOMATIC: System armed, PID controls servo");
-  dualPrintln("  MANUAL: System disarmed, pin 35 potentiometer controls servo");
+  dualPrintln("  AUTOMATIC: System armed, PID controls servo within calibrated range");
+  dualPrintln("  MANUAL: System disarmed, pin 35 potentiometer controls servo within calibrated range");
   dualPrintln("=======================================");
 }
