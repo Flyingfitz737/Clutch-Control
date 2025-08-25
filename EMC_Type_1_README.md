@@ -47,7 +47,11 @@ The controller can accept the following commands via both Serial Monitor and Blu
 - **`setrpm <value>`**: Sets the target RPM.
 - **`setpid <kp> <ki> <kd>`**: Configures PID constants.
 - **`arm` / `disarm`**: Toggles between automatic and manual modes.
-- **`status`**: Displays the current system status.
+- **`calibrate set_min <value>`**: Sets the minimum servo position (0-180 degrees).
+- **`calibrate set_max <value>`**: Sets the maximum servo position (0-180 degrees).
+- **`calibrate set_neutral <value>`**: Sets the neutral servo position (0-180 degrees).
+- **`calibrate direction <0|1>`**: Sets servo travel direction (0=normal, 1=reversed).
+- **`status`**: Displays the current system status including calibration settings.
 - **`help`**: Lists available commands and their descriptions.
 
 ### **Bluetooth Classic Integration (ESP32 Version)**
@@ -72,9 +76,18 @@ The controller can accept the following commands via both Serial Monitor and Blu
 
 ### **Safety and Stability**
 - Includes safeguards such as:
-  - Constraining servo positions within valid ranges.
+  - Constraining servo positions within calibrated valid ranges.
   - Checking the validity of user inputs.
   - Disabling interrupts during critical operations to prevent race conditions.
+  - Automatic validation and adjustment of calibration parameters.
+
+### **Servo Calibration Feature**
+- **Customizable Servo Range**: Set minimum and maximum servo positions to match your specific servo and mechanical setup.
+- **Neutral Position**: Configure the default servo position used at startup and when no specific input is provided.
+- **Direction Control**: Reverse servo travel direction to match your mechanical requirements.
+- **Real-time Feedback**: Servo moves to the specified position during calibration for immediate visual confirmation.
+- **Non-volatile Storage**: All calibration parameters are automatically saved to EEPROM (Arduino Uno) or Preferences (ESP32).
+- **Validation**: Calibration parameters are validated to ensure they remain within valid ranges and logical constraints.
 
 ---
 
