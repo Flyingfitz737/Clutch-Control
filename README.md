@@ -16,6 +16,9 @@ Arduino Uno-based controller featuring:
 
 **ESP32 Version Adds:**
 - **Bluetooth Classic communication** (Device: `EMC_Type_1_Controller`)
+- **Advanced servo calibration system** with EEPROM storage
+- **Configurable servo endpoints, neutral position, and travel direction**
+- **Real-time calibration feedback** with visual servo movement confirmation
 - Wireless remote control and monitoring
 - Simultaneous Serial and Bluetooth feedback
 

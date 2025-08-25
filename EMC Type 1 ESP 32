@@ -6,12 +6,14 @@
 
 // ===== EMC Type 1 Controller for ESP32 =====
 // Hydraulic clutch controller with user-defined parameters,
-// automatic sensor inputs, PID control, LED feedback, and Bluetooth Classic communication
+// automatic sensor inputs, PID control, LED feedback, Bluetooth Classic communication,
+// and advanced servo calibration system with persistent EEPROM storage
 //
 // Required Libraries for ESP32:
 // - PID_v1 (Arduino IDE Library Manager)
 // - ESP32Servo (Arduino IDE Library Manager)
 // - BluetoothSerial (included with ESP32 Core)
+// - EEPROM (included with ESP32 Core)
 //
 // Hardware Requirements:
 // - ESP32 development board
@@ -23,8 +25,16 @@
 //
 // Bluetooth Features:
 // - Device name: "EMC_Type_1_Controller"
-// - Supports all serial commands: setrpm, setpid, arm, disarm, status, help
+// - Supports all serial commands: setrpm, setpid, calibrate, arm, disarm, status, help
 // - Real-time status feedback over Bluetooth
+//
+// Calibration Features:
+// - Set minimum and maximum servo endpoints
+// - Configure neutral/default servo position
+// - Set servo travel direction (normal/reversed)
+// - Persistent EEPROM storage of all calibration parameters
+// - Real-time servo movement during calibration for visual confirmation
+// - Safety validation of all calibration inputs
 
 // ===== Pin Definitions =====
 const int rpmSensorPin = 19;        // Digital pin for RPM sensor pulse train (interrupt capable)
