@@ -46,9 +46,22 @@ The main features and components of the code are:
 The controller can accept the following commands via both Serial Monitor and Bluetooth Classic connection:
 - **`setrpm <value>`**: Sets the target RPM.
 - **`setpid <kp> <ki> <kd>`**: Configures PID constants.
+- **`calibrate set_min <value>`**: Sets the minimum servo position (0-180 degrees).
+- **`calibrate set_max <value>`**: Sets the maximum servo position (0-180 degrees).
+- **`calibrate set_neutral <value>`**: Sets the neutral/default servo position.
+- **`calibrate direction <normal|reversed>`**: Sets the servo travel direction.
 - **`arm` / `disarm`**: Toggles between automatic and manual modes.
-- **`status`**: Displays the current system status.
+- **`status`**: Displays the current system status including calibration settings.
 - **`help`**: Lists available commands and their descriptions.
+
+### **Servo Calibration System (ESP32 Version)**
+The ESP32 version includes an advanced servo calibration system that allows for precise servo setup and configuration:
+- **Minimum/Maximum Endpoints**: Configure the operational range of the servo for both automatic and manual modes.
+- **Neutral Position**: Set a default position that the servo returns to when switching modes.
+- **Travel Direction**: Configure normal or reversed servo operation to match mechanical requirements.
+- **Real-time Feedback**: Servo moves to the specified position immediately during calibration for visual confirmation.
+- **Persistent Storage**: All calibration parameters are automatically saved to EEPROM and loaded on system startup.
+- **Safety Constraints**: All servo operations respect the calibrated limits to prevent mechanical damage.
 
 ### **Bluetooth Classic Integration (ESP32 Version)**
 - **Device Name**: `EMC_Type_1_Controller`
@@ -72,9 +85,59 @@ The controller can accept the following commands via both Serial Monitor and Blu
 
 ### **Safety and Stability**
 - Includes safeguards such as:
-  - Constraining servo positions within valid ranges.
+  - Constraining servo positions within calibrated ranges (ESP32 version).
   - Checking the validity of user inputs.
   - Disabling interrupts during critical operations to prevent race conditions.
+  - Automatic validation of calibration parameters to prevent invalid configurations.
+  - EEPROM data integrity checks to ensure reliable calibration storage (ESP32 version).
+
+---
+
+## Servo Calibration Guide (ESP32 Version Only)
+
+The ESP32 version includes a comprehensive servo calibration system. Follow these steps to set up your servo for optimal performance:
+
+### **Initial Setup**
+1. Connect to the controller via Serial Monitor or Bluetooth
+2. Use the `status` command to view current calibration settings
+3. Default settings: Min=0°, Max=180°, Neutral=90°, Direction=Normal
+
+### **Setting Servo Limits**
+1. **Set Minimum Position**: `calibrate set_min <value>`
+   - Example: `calibrate set_min 10` (sets minimum to 10 degrees)
+   - The servo will move to this position for visual verification
+   - Ensure this position doesn't cause mechanical binding
+
+2. **Set Maximum Position**: `calibrate set_max <value>`
+   - Example: `calibrate set_max 170` (sets maximum to 170 degrees)
+   - The servo will move to this position for visual verification
+   - Ensure this position doesn't cause mechanical binding
+
+### **Setting Neutral Position**
+1. **Set Neutral/Default Position**: `calibrate set_neutral <value>`
+   - Example: `calibrate set_neutral 85` (sets neutral to 85 degrees)
+   - Must be between your min and max positions
+   - This position is used when switching between modes
+
+### **Setting Travel Direction**
+1. **Normal Direction**: `calibrate direction normal`
+   - Servo moves in standard direction (0° to 180°)
+   
+2. **Reversed Direction**: `calibrate direction reversed`
+   - Servo movement is reversed for mechanical compatibility
+   - Useful when servo needs to operate in opposite direction
+
+### **Verification and Testing**
+1. Use `status` command to verify all calibration settings
+2. Test both automatic and manual modes to ensure proper operation
+3. All settings are automatically saved to EEPROM
+4. Settings persist through power cycles
+
+### **Safety Notes**
+- Always verify mechanical clearances before setting extreme positions
+- Test servo movement gradually to avoid damage
+- The system automatically constrains all movements within calibrated limits
+- Invalid calibration values are rejected with error messages
 
 ---
 
