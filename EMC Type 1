@@ -20,7 +20,9 @@ const int armSwitchPin = 2;         // Digital pin for arm switch
 // Calibration parameters
 int min_position = 0;               // Minimum servo position (0-180)
 int max_position = 180;             // Maximum servo position (0-180)
-int neutral_position = 90;          // Neutral servo position (0-180)
+int neutral_position = 90;          // Legacy neutral servo position (0-180) - for backward compatibility
+int manual_neutral_position = 90;   // Neutral servo position for manual mode (0-180)
+int auto_neutral_position = 90;     // Neutral servo position for automatic mode (0-180)
 bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
 
 // EEPROM addresses for calibration data
@@ -29,6 +31,8 @@ const int EEPROM_MAX_POS_ADDR = 2;
 const int EEPROM_NEUTRAL_POS_ADDR = 4;
 const int EEPROM_DIRECTION_ADDR = 6;
 const int EEPROM_MAGIC_ADDR = 8;    // Magic number to check if EEPROM data is valid
+const int EEPROM_MANUAL_NEUTRAL_ADDR = 10;  // Manual mode neutral position
+const int EEPROM_AUTO_NEUTRAL_ADDR = 12;    // Automatic mode neutral position
 const int EEPROM_MAGIC_VALUE = 0xABCD;
 
 // RPM pulse counting variables (volatile for ISR)
@@ -93,7 +97,7 @@ void setup() {
   
   // Initialize servo
   clutchServo.attach(servoPin);
-  servoPosition = neutral_position;  // Use calibrated neutral position
+  servoPosition = auto_neutral_position;  // Use automatic mode neutral position as startup default
   clutchServo.write(servoPosition);
   
   // Initialize PID controller
@@ -119,6 +123,8 @@ void setup() {
   Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
   Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
   Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("  calibrate set_manual_neutral <value> - Set manual mode neutral position (0-180)");
+  Serial.println("  calibrate set_auto_neutral <value>   - Set automatic mode neutral position (0-180)");
   Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
@@ -262,10 +268,16 @@ void processCommand(String command) {
   }
   else if (command == "arm") {
     systemArmed = true;
+    // Move to auto neutral position when switching to automatic mode
+    servoPosition = applyCalibration(auto_neutral_position);
+    clutchServo.write(servoPosition);
     Serial.println("System ARMED - Automatic PID Control Mode");
   }
   else if (command == "disarm") {
     systemArmed = false;
+    // Move to manual neutral position when switching to manual mode
+    servoPosition = applyCalibration(manual_neutral_position);
+    clutchServo.write(servoPosition);
     Serial.println("System DISARMED - Manual Control Mode");
   }
   else if (command == "status") {
@@ -286,10 +298,16 @@ void updateSystemState() {
   
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
+    // Move to auto neutral position when switching to automatic mode
+    servoPosition = applyCalibration(auto_neutral_position);
+    clutchServo.write(servoPosition);
     Serial.println("System ARMED via switch - Automatic PID Control Mode");
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
+    // Move to manual neutral position when switching to manual mode
+    servoPosition = applyCalibration(manual_neutral_position);
+    clutchServo.write(servoPosition);
     Serial.println("System DISARMED via switch - Manual Control Mode");
   }
 }
@@ -368,7 +386,9 @@ void printDetailedStatus() {
   Serial.println("Calibration Settings:");
   Serial.println("  Min Position: " + String(min_position) + "°");
   Serial.println("  Max Position: " + String(max_position) + "°");
-  Serial.println("  Neutral Position: " + String(neutral_position) + "°");
+  Serial.println("  Legacy Neutral Position: " + String(neutral_position) + "°");
+  Serial.println("  Manual Mode Neutral Position: " + String(manual_neutral_position) + "°");
+  Serial.println("  Auto Mode Neutral Position: " + String(auto_neutral_position) + "°");
   Serial.println("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   Serial.println();
   
@@ -390,6 +410,8 @@ void printHelp() {
   Serial.println("calibrate set_min <value>     - Set minimum servo position (0-180)");
   Serial.println("calibrate set_max <value>     - Set maximum servo position (0-180)");
   Serial.println("calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("calibrate set_manual_neutral <value> - Set manual mode neutral position (0-180)");
+  Serial.println("calibrate set_auto_neutral <value>   - Set automatic mode neutral position (0-180)");
   Serial.println("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
   Serial.println("status             - Show detailed status");
   Serial.println("help               - Show this help");
@@ -420,10 +442,20 @@ void loadCalibrationData() {
     EEPROM.get(EEPROM_NEUTRAL_POS_ADDR, neutral_position);
     EEPROM.get(EEPROM_DIRECTION_ADDR, direction_reversed);
     
+    // Load new neutral positions if they exist, otherwise use legacy neutral_position
+    manual_neutral_position = neutral_position;  // Default to legacy value
+    auto_neutral_position = neutral_position;    // Default to legacy value
+    
+    // Try to read the new neutral positions from EEPROM
+    EEPROM.get(EEPROM_MANUAL_NEUTRAL_ADDR, manual_neutral_position);
+    EEPROM.get(EEPROM_AUTO_NEUTRAL_ADDR, auto_neutral_position);
+    
     // Validate loaded data
     min_position = constrain(min_position, 0, 180);
     max_position = constrain(max_position, 0, 180);
     neutral_position = constrain(neutral_position, min_position, max_position);
+    manual_neutral_position = constrain(manual_neutral_position, min_position, max_position);
+    auto_neutral_position = constrain(auto_neutral_position, min_position, max_position);
     
     Serial.println("Calibration data loaded from EEPROM");
   } else {
@@ -438,6 +470,8 @@ void saveCalibrationData() {
   EEPROM.put(EEPROM_MAX_POS_ADDR, max_position);
   EEPROM.put(EEPROM_NEUTRAL_POS_ADDR, neutral_position);
   EEPROM.put(EEPROM_DIRECTION_ADDR, direction_reversed);
+  EEPROM.put(EEPROM_MANUAL_NEUTRAL_ADDR, manual_neutral_position);
+  EEPROM.put(EEPROM_AUTO_NEUTRAL_ADDR, auto_neutral_position);
   EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
   
   Serial.println("Calibration data saved to EEPROM");
@@ -454,6 +488,12 @@ void processCalibrationCommand(String command) {
       if (neutral_position < min_position) {
         neutral_position = min_position;
       }
+      if (manual_neutral_position < min_position) {
+        manual_neutral_position = min_position;
+      }
+      if (auto_neutral_position < min_position) {
+        auto_neutral_position = min_position;
+      }
       
       // Update PID output limits
       myPID.SetOutputLimits(min_position, max_position);
@@ -465,7 +505,13 @@ void processCalibrationCommand(String command) {
       saveCalibrationData();
       Serial.println("Minimum position set to: " + String(min_position) + "° (servo moved for confirmation)");
       if (neutral_position != command.substring(8).toInt()) {
-        Serial.println("Neutral position adjusted to: " + String(neutral_position) + "°");
+        Serial.println("Legacy neutral position adjusted to: " + String(neutral_position) + "°");
+      }
+      if (manual_neutral_position != command.substring(8).toInt()) {
+        Serial.println("Manual neutral position adjusted to: " + String(manual_neutral_position) + "°");
+      }
+      if (auto_neutral_position != command.substring(8).toInt()) {
+        Serial.println("Auto neutral position adjusted to: " + String(auto_neutral_position) + "°");
       }
     } else {
       Serial.println("Invalid minimum position. Must be 0-180 and less than max position (" + String(max_position) + ")");
@@ -478,6 +524,12 @@ void processCalibrationCommand(String command) {
       if (neutral_position > max_position) {
         neutral_position = max_position;
       }
+      if (manual_neutral_position > max_position) {
+        manual_neutral_position = max_position;
+      }
+      if (auto_neutral_position > max_position) {
+        auto_neutral_position = max_position;
+      }
       
       // Update PID output limits
       myPID.SetOutputLimits(min_position, max_position);
@@ -489,7 +541,13 @@ void processCalibrationCommand(String command) {
       saveCalibrationData();
       Serial.println("Maximum position set to: " + String(max_position) + "° (servo moved for confirmation)");
       if (neutral_position != command.substring(8).toInt()) {
-        Serial.println("Neutral position adjusted to: " + String(neutral_position) + "°");
+        Serial.println("Legacy neutral position adjusted to: " + String(neutral_position) + "°");
+      }
+      if (manual_neutral_position != command.substring(8).toInt()) {
+        Serial.println("Manual neutral position adjusted to: " + String(manual_neutral_position) + "°");
+      }
+      if (auto_neutral_position != command.substring(8).toInt()) {
+        Serial.println("Auto neutral position adjusted to: " + String(auto_neutral_position) + "°");
       }
     } else {
       Serial.println("Invalid maximum position. Must be 0-180 and greater than min position (" + String(min_position) + ")");
@@ -499,15 +557,53 @@ void processCalibrationCommand(String command) {
     int value = command.substring(12).toInt();
     if (value >= min_position && value <= max_position) {
       neutral_position = value;
+      manual_neutral_position = value;  // Set both manual and auto to the same value for backward compatibility
+      auto_neutral_position = value;
       
       // Move servo to new position for visual confirmation
-      servoPosition = applyCalibration(neutral_position);
+      servoPosition = applyCalibration(value);
       clutchServo.write(servoPosition);
       
       saveCalibrationData();
-      Serial.println("Neutral position set to: " + String(neutral_position) + "° (servo moved for confirmation)");
+      Serial.println("Neutral position set to: " + String(value) + "° (both manual and auto modes, servo moved for confirmation)");
     } else {
       Serial.println("Invalid neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_manual_neutral ")) {
+    int value = command.substring(19).toInt();
+    if (value >= min_position && value <= max_position) {
+      manual_neutral_position = value;
+      
+      // Move servo to new position for visual confirmation if in manual mode
+      if (!systemArmed) {
+        servoPosition = applyCalibration(manual_neutral_position);
+        clutchServo.write(servoPosition);
+      }
+      
+      saveCalibrationData();
+      Serial.println("Manual mode neutral position set to: " + String(manual_neutral_position) + "°" + 
+                    (!systemArmed ? " (servo moved for confirmation)" : ""));
+    } else {
+      Serial.println("Invalid manual neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_auto_neutral ")) {
+    int value = command.substring(17).toInt();
+    if (value >= min_position && value <= max_position) {
+      auto_neutral_position = value;
+      
+      // Move servo to new position for visual confirmation if in automatic mode
+      if (systemArmed) {
+        servoPosition = applyCalibration(auto_neutral_position);
+        clutchServo.write(servoPosition);
+      }
+      
+      saveCalibrationData();
+      Serial.println("Automatic mode neutral position set to: " + String(auto_neutral_position) + "°" + 
+                    (systemArmed ? " (servo moved for confirmation)" : ""));
+    } else {
+      Serial.println("Invalid auto neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
     }
   }
   else if (command.startsWith("direction ")) {
@@ -526,7 +622,7 @@ void processCalibrationCommand(String command) {
     }
   }
   else {
-    Serial.println("Unknown calibration command. Available: set_min, set_max, set_neutral, direction");
+    Serial.println("Unknown calibration command. Available: set_min, set_max, set_neutral, set_manual_neutral, set_auto_neutral, direction");
   }
 }
 
@@ -546,7 +642,9 @@ void printCalibrationStatus() {
   Serial.println("=== Calibration Status ===");
   Serial.println("Minimum Position: " + String(min_position) + "°");
   Serial.println("Maximum Position: " + String(max_position) + "°");
-  Serial.println("Neutral Position: " + String(neutral_position) + "°");
+  Serial.println("Legacy Neutral Position: " + String(neutral_position) + "°");
+  Serial.println("Manual Mode Neutral Position: " + String(manual_neutral_position) + "°");
+  Serial.println("Auto Mode Neutral Position: " + String(auto_neutral_position) + "°");
   Serial.println("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   Serial.println("===========================");
 }
