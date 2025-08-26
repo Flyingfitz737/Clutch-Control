@@ -48,7 +48,9 @@ The controller can accept the following commands via both Serial Monitor and Blu
 - **`arm` / `disarm`**: Toggles between automatic and manual modes.
 - **`calibrate set_min <value>`**: Sets the minimum servo position (0-180 degrees).
 - **`calibrate set_max <value>`**: Sets the maximum servo position (0-180 degrees).
-- **`calibrate set_neutral <value>`**: Sets the neutral servo position (0-180 degrees).
+- **`calibrate set_neutral <value>`**: Sets both neutral servo positions (0-180 degrees) - backward compatibility.
+- **`calibrate set_manual_neutral <value>`**: Sets the neutral servo position for manual mode (0-180 degrees).
+- **`calibrate set_auto_neutral <value>`**: Sets the neutral servo position for automatic mode (0-180 degrees).
 - **`calibrate direction <0|1>`**: Sets servo travel direction (0=normal, 1=reversed).
 - **`status`**: Displays the current system status including calibration settings.
 - **`help`**: Lists available commands and their descriptions.
@@ -82,11 +84,41 @@ The controller can accept the following commands via both Serial Monitor and Blu
 
 ### **Servo Calibration Feature**
 - **Customizable Servo Range**: Set minimum and maximum servo positions to match your specific servo and mechanical setup.
-- **Neutral Position**: Configure the default servo position used at startup and when no specific input is provided.
+- **Separate Neutral Positions**: Configure distinct neutral positions for manual and automatic modes to optimize servo behavior for each operating mode.
 - **Direction Control**: Reverse servo travel direction to match your mechanical requirements.
 - **Real-time Feedback**: Servo moves to the specified position during calibration for immediate visual confirmation.
 - **Non-volatile Storage**: All calibration parameters are automatically saved to EEPROM (Arduino Uno) or Preferences (ESP32).
 - **Validation**: Calibration parameters are validated to ensure they remain within valid ranges and logical constraints.
+- **Backward Compatibility**: Legacy single neutral position commands are supported for existing configurations.
+
+---
+
+## **Separate Neutral Positions Feature (ESP32 Version)**
+
+The ESP32 version now supports separate neutral positions for manual and automatic modes, providing greater flexibility for different operational requirements:
+
+### **Manual Mode Neutral Position**
+- Used when the system is disarmed (manual control mode)
+- Set via command: `calibrate set_manual_neutral <value>`
+- Applied automatically when switching to manual mode
+- Optimized for manual potentiometer control operation
+
+### **Automatic Mode Neutral Position**
+- Used when the system is armed (automatic PID control mode)
+- Set via command: `calibrate set_auto_neutral <value>`
+- Applied automatically when switching to automatic mode
+- Optimized for PID control operation and target RPM achievement
+
+### **Benefits**
+- **Mode-Specific Optimization**: Different neutral positions can be optimized for the specific characteristics of each operating mode
+- **Smooth Transitions**: Automatic servo movement to appropriate neutral position when switching modes
+- **Backward Compatibility**: Legacy `calibrate set_neutral <value>` command sets both positions simultaneously
+- **Persistent Storage**: Both neutral positions are saved to non-volatile memory (Preferences)
+
+### **Migration from Legacy Systems**
+- Existing configurations with single neutral position are automatically migrated
+- Legacy neutral position value is applied to both manual and automatic modes
+- No configuration loss during system updates
 
 ---
 
