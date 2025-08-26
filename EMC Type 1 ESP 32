@@ -16,7 +16,8 @@
 // Hardware Requirements:
 // - ESP32 development board
 // - RPM sensor connected to GPIO19
-// - Potentiometers connected to GPIO34 and GPIO35
+// - Clutch switch connected to GPIO34
+// - Manual control potentiometer connected to GPIO35
 // - Servo motor connected to GPIO18
 // - Arm switch connected to GPIO21
 // - LED connected to GPIO2 (or use built-in LED)
@@ -28,7 +29,7 @@
 
 // ===== Pin Definitions =====
 const int rpmSensorPin = 19;        // Digital pin for RPM sensor pulse train (interrupt capable)
-const int potentiometerPin = 34;    // Analog input for additional potentiometer (ADC1_CH6)
+const int clutchSwitchPin = 34;     // Digital input for clutch switch
 const int manualPotPin = 35;        // Analog input for manual servo control potentiometer (ADC1_CH7)
 const int servoPin = 18;            // PWM pin for servo motor control
 const int armLightPin = 2;          // LED pin for arming light (built-in LED on ESP32)
@@ -53,7 +54,7 @@ const unsigned long rpmCalculationInterval = 1000; // Calculate RPM every 1000ms
 const int pulsesPerRevolution = 1; // Assuming 1 pulse per revolution for ECU signal
 
 // Sensor readings
-int potValue = 0;
+bool clutchSwitchState = false;
 int manualPotValue = 0;
 bool armSwitch = false;
 
@@ -103,7 +104,7 @@ void setup() {
   
   // Initialize pin modes
   pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
-  pinMode(potentiometerPin, INPUT);
+  pinMode(clutchSwitchPin, INPUT_PULLUP); // Digital input with pullup for clutch switch
   pinMode(manualPotPin, INPUT);
   pinMode(armLightPin, OUTPUT);
   pinMode(armSwitchPin, INPUT_PULLUP);
@@ -137,6 +138,7 @@ void setup() {
   Serial.println("=== EMC Type 1 Controller Initialized (ESP32) ===");
   Serial.println("Bluetooth Device Name: EMC_Type_1_Controller");
   Serial.println("RPM Input: Digital pulse train on pin 19 (interrupt)");
+  Serial.println("Clutch Switch: Digital input on pin 34");
   Serial.println("Manual Control: Potentiometer on pin 35");
   Serial.println("Commands (via Serial or Bluetooth):");
   Serial.println("  setrpm <value>     - Set target RPM");
@@ -230,8 +232,8 @@ void readSensors() {
     lastRPMCalculation = currentTime;
   }
   
-  // Read potentiometer
-  potValue = analogRead(potentiometerPin);
+  // Read clutch switch (active LOW with pullup)
+  clutchSwitchState = !digitalRead(clutchSwitchPin);
   
   // Read manual control potentiometer
   manualPotValue = analogRead(manualPotPin);
@@ -413,7 +415,7 @@ void printDetailedStatus() {
   dualPrintln("  RPM Sensor: Digital pulse train on pin 19");
   dualPrintln("  Current RPM: " + String(currentRPM));
   dualPrintln("  Pulse Count (current interval): " + String(currentPulseCount));
-  dualPrintln("  Potentiometer: " + String(potValue));
+  dualPrintln("  Clutch Switch: " + String(clutchSwitchState ? "ON" : "OFF"));
   dualPrintln("  Manual Control Pot: " + String(manualPotValue));
   dualPrintln("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
 
