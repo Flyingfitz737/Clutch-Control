@@ -48,7 +48,9 @@ The controller can accept the following commands via both Serial Monitor and Blu
 - **`arm` / `disarm`**: Toggles between automatic and manual modes.
 - **`calibrate set_min <value>`**: Sets the minimum servo position (0-180 degrees).
 - **`calibrate set_max <value>`**: Sets the maximum servo position (0-180 degrees).
-- **`calibrate set_neutral <value>`**: Sets the neutral servo position (0-180 degrees).
+- **`calibrate set_neutral <value>`**: Sets the neutral servo position for both modes (0-180 degrees).
+- **`calibrate set_manual_neutral <value>`**: Sets the neutral servo position for manual mode only (0-180 degrees).
+- **`calibrate set_auto_neutral <value>`**: Sets the neutral servo position for automatic mode only (0-180 degrees).
 - **`calibrate direction <0|1>`**: Sets servo travel direction (0=normal, 1=reversed).
 - **`status`**: Displays the current system status including calibration settings.
 - **`help`**: Lists available commands and their descriptions.
@@ -82,11 +84,34 @@ The controller can accept the following commands via both Serial Monitor and Blu
 
 ### **Servo Calibration Feature**
 - **Customizable Servo Range**: Set minimum and maximum servo positions to match your specific servo and mechanical setup.
-- **Neutral Position**: Configure the default servo position used at startup and when no specific input is provided.
+- **Dual Neutral Positions**: Configure separate neutral servo positions for manual and automatic modes, providing greater flexibility for different operating conditions.
+  - **Manual Mode Neutral**: Set the neutral position used when the system is disarmed and under potentiometer control.
+  - **Automatic Mode Neutral**: Set the neutral position used when the system is armed and under PID control.
+  - **Legacy Compatibility**: The `set_neutral` command sets both manual and automatic neutral positions simultaneously for backward compatibility.
 - **Direction Control**: Reverse servo travel direction to match your mechanical requirements.
 - **Real-time Feedback**: Servo moves to the specified position during calibration for immediate visual confirmation.
 - **Non-volatile Storage**: All calibration parameters are automatically saved to EEPROM (Arduino Uno) or Preferences (ESP32).
 - **Validation**: Calibration parameters are validated to ensure they remain within valid ranges and logical constraints.
+- **Mode-Aware Neutral Switching**: When switching between manual and automatic modes, the servo automatically moves to the appropriate neutral position.
+
+### **Dual Neutral Position Feature**
+This enhanced feature allows for separate neutral positions in manual and automatic modes, providing greater control flexibility:
+
+#### **Use Cases**
+- **Different Engagement Points**: Configure different starting positions for manual vs. automatic operation.
+- **Mechanical Optimization**: Account for varying mechanical requirements between control modes.
+- **System Behavior Customization**: Fine-tune system response for each operating mode independently.
+
+#### **Configuration Commands**
+- **`calibrate set_manual_neutral <value>`**: Sets neutral position for manual mode (0-180°)
+- **`calibrate set_auto_neutral <value>`**: Sets neutral position for automatic mode (0-180°)
+- **`calibrate set_neutral <value>`**: Sets both positions simultaneously (backward compatibility)
+
+#### **Behavior**
+- **Startup**: System starts with the automatic mode neutral position
+- **Mode Switching**: Servo automatically moves to the appropriate neutral when switching modes
+- **Visual Confirmation**: During calibration, servo moves to demonstrate the new position
+- **Validation**: All neutral positions are constrained within the min/max servo range
 
 ---
 
