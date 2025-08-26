@@ -20,9 +20,8 @@ The main features and components of the code are:
 
 ### **Input Sensors**
 - **RPM Pulse Sensor** (`rpmSensorPin`): Measures engine speed in pulses per revolution and calculates RPM using timing intervals.
-- **Potentiometers**: 
-  - One for additional input (`potentiometerPin`).
-  - Another for manual control (`manualPotPin`).
+- **Clutch Switch** (`clutchSwitchPin`): Digital switch input for clutch control functionality.
+- **Manual Control Potentiometer** (`manualPotPin`): Potentiometer for manual servo control.
 
 ### **Outputs**
 - **Servo Motor Control**:
