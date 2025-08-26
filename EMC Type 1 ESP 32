@@ -39,7 +39,8 @@ const int armSwitchPin = 21;        // Digital pin for arm switch
 // Calibration parameters
 int min_position = 0;               // Minimum servo position (0-180)
 int max_position = 180;             // Maximum servo position (0-180)
-int neutral_position = 90;          // Neutral servo position (0-180)
+int manual_neutral_position = 90;   // Neutral servo position for manual mode (0-180)
+int auto_neutral_position = 90;     // Neutral servo position for automatic mode (0-180)
 bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
 
 // Preferences object for non-volatile storage (ESP32)
@@ -119,7 +120,7 @@ void setup() {
   
   // Initialize servo
   clutchServo.attach(servoPin);
-  servoPosition = neutral_position;  // Use calibrated neutral position
+  servoPosition = manual_neutral_position;  // Use manual neutral position at startup
   clutchServo.write(servoPosition);
   
   // Initialize PID controller
@@ -146,7 +147,8 @@ void setup() {
   Serial.println("  disarm             - Disarm the system (manual mode)");
   Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
   Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
-  Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("  calibrate set_manual_neutral <value> - Set manual neutral servo position (0-180)");
+  Serial.println("  calibrate set_auto_neutral <value> - Set automatic neutral servo position (0-180)");
   Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
@@ -323,12 +325,26 @@ void processCommand(String command) {
     processCalibrationCommand(command.substring(10));
   }
   else if (command == "arm") {
-    systemArmed = true;
-    dualPrintln("System ARMED - Automatic PID Control Mode");
+    if (!systemArmed) {
+      systemArmed = true;
+      // Move to auto neutral position when arming
+      servoPosition = applyCalibration(auto_neutral_position);
+      clutchServo.write(servoPosition);
+      dualPrintln("System ARMED - Automatic PID Control Mode (moved to auto neutral: " + String(auto_neutral_position) + "°)");
+    } else {
+      dualPrintln("System already ARMED");
+    }
   }
   else if (command == "disarm") {
-    systemArmed = false;
-    dualPrintln("System DISARMED - Manual Control Mode");
+    if (systemArmed) {
+      systemArmed = false;
+      // Move to manual neutral position when disarming
+      servoPosition = applyCalibration(manual_neutral_position);
+      clutchServo.write(servoPosition);
+      dualPrintln("System DISARMED - Manual Control Mode (moved to manual neutral: " + String(manual_neutral_position) + "°)");
+    } else {
+      dualPrintln("System already DISARMED");
+    }
   }
   else if (command == "status") {
     printDetailedStatus();
@@ -348,11 +364,17 @@ void updateSystemState() {
   
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
-    dualPrintln("System ARMED via switch - Automatic PID Control Mode");
+    // Move to auto neutral position when arming
+    servoPosition = applyCalibration(auto_neutral_position);
+    clutchServo.write(servoPosition);
+    dualPrintln("System ARMED via switch - Automatic PID Control Mode (moved to auto neutral: " + String(auto_neutral_position) + "°)");
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
-    dualPrintln("System DISARMED via switch - Manual Control Mode");
+    // Move to manual neutral position when disarming
+    servoPosition = applyCalibration(manual_neutral_position);
+    clutchServo.write(servoPosition);
+    dualPrintln("System DISARMED via switch - Manual Control Mode (moved to manual neutral: " + String(manual_neutral_position) + "°)");
   }
 }
 
@@ -430,7 +452,8 @@ void printDetailedStatus() {
   dualPrintln("Calibration Settings:");
   dualPrintln("  Min Position: " + String(min_position) + "°");
   dualPrintln("  Max Position: " + String(max_position) + "°");
-  dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("  Manual Neutral Position: " + String(manual_neutral_position) + "°");
+  dualPrintln("  Auto Neutral Position: " + String(auto_neutral_position) + "°");
   dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln();
   
@@ -451,7 +474,9 @@ void printHelp() {
   dualPrintln("disarm             - Disarm system (manual control mode)");
   dualPrintln("calibrate set_min <value>     - Set minimum servo position (0-180)");
   dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
-  dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  dualPrintln("calibrate set_neutral <value> - Set both neutral positions (backward compatibility)");
+  dualPrintln("calibrate set_manual_neutral <value> - Set manual mode neutral position (0-180)");
+  dualPrintln("calibrate set_auto_neutral <value> - Set automatic mode neutral position (0-180)");
   dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
   dualPrintln("status             - Show detailed status");
   dualPrintln("help               - Show this help");
@@ -462,7 +487,9 @@ void printHelp() {
   dualPrintln("");
   dualPrintln("CALIBRATION:");
   dualPrintln("  All servo positions are constrained to min/max range");
-  dualPrintln("  Neutral position is used as default startup position");
+  dualPrintln("  Separate neutral positions for manual and automatic modes");
+  dualPrintln("  Manual neutral: used when system is disarmed");
+  dualPrintln("  Auto neutral: used when system is armed");
   dualPrintln("  Direction setting reverses servo travel if needed");
   dualPrintln("  Calibration data is saved to Preferences automatically");
   dualPrintln("=======================================");
@@ -476,13 +503,30 @@ void loadCalibrationData() {
   // Load calibration data with defaults
   min_position = preferences.getInt("min_pos", 0);
   max_position = preferences.getInt("max_pos", 180);
-  neutral_position = preferences.getInt("neutral_pos", 90);
+  
+  // Check for separate neutral positions (new format)
+  manual_neutral_position = preferences.getInt("manual_neutral", -1);
+  auto_neutral_position = preferences.getInt("auto_neutral", -1);
+  
+  // Backward compatibility: if separate neutral positions don't exist, use legacy neutral_position
+  if (manual_neutral_position == -1 || auto_neutral_position == -1) {
+    int legacy_neutral = preferences.getInt("neutral_pos", 90);
+    manual_neutral_position = legacy_neutral;
+    auto_neutral_position = legacy_neutral;
+    
+    // Save the new format to preserve the values for next time
+    preferences.putInt("manual_neutral", manual_neutral_position);
+    preferences.putInt("auto_neutral", auto_neutral_position);
+    dualPrintln("Migrated legacy neutral position to separate manual/auto positions");
+  }
+  
   direction_reversed = preferences.getBool("direction", false);
   
   // Validate loaded data
   min_position = constrain(min_position, 0, 180);
   max_position = constrain(max_position, 0, 180);
-  neutral_position = constrain(neutral_position, min_position, max_position);
+  manual_neutral_position = constrain(manual_neutral_position, min_position, max_position);
+  auto_neutral_position = constrain(auto_neutral_position, min_position, max_position);
   
   preferences.end();
   
@@ -494,7 +538,8 @@ void saveCalibrationData() {
   
   preferences.putInt("min_pos", min_position);
   preferences.putInt("max_pos", max_position);
-  preferences.putInt("neutral_pos", neutral_position);
+  preferences.putInt("manual_neutral", manual_neutral_position);
+  preferences.putInt("auto_neutral", auto_neutral_position);
   preferences.putBool("direction", direction_reversed);
   
   preferences.end();
@@ -510,8 +555,15 @@ void processCalibrationCommand(String command) {
     int value = command.substring(8).toInt();
     if (value >= 0 && value <= 180 && value < max_position) {
       min_position = value;
-      if (neutral_position < min_position) {
-        neutral_position = min_position;
+      // Adjust neutral positions if they're below the new minimum
+      bool adjusted = false;
+      if (manual_neutral_position < min_position) {
+        manual_neutral_position = min_position;
+        adjusted = true;
+      }
+      if (auto_neutral_position < min_position) {
+        auto_neutral_position = min_position;
+        adjusted = true;
       }
       
       // Update PID output limits
@@ -523,8 +575,8 @@ void processCalibrationCommand(String command) {
       
       saveCalibrationData();
       dualPrintln("Minimum position set to: " + String(min_position) + "° (servo moved for confirmation)");
-      if (neutral_position != command.substring(8).toInt()) {
-        dualPrintln("Neutral position adjusted to: " + String(neutral_position) + "°");
+      if (adjusted) {
+        dualPrintln("Neutral positions adjusted - Manual: " + String(manual_neutral_position) + "°, Auto: " + String(auto_neutral_position) + "°");
       }
     } else {
       dualPrintln("Invalid minimum position. Must be 0-180 and less than max position (" + String(max_position) + ")");
@@ -534,8 +586,15 @@ void processCalibrationCommand(String command) {
     int value = command.substring(8).toInt();
     if (value >= 0 && value <= 180 && value > min_position) {
       max_position = value;
-      if (neutral_position > max_position) {
-        neutral_position = max_position;
+      // Adjust neutral positions if they're above the new maximum
+      bool adjusted = false;
+      if (manual_neutral_position > max_position) {
+        manual_neutral_position = max_position;
+        adjusted = true;
+      }
+      if (auto_neutral_position > max_position) {
+        auto_neutral_position = max_position;
+        adjusted = true;
       }
       
       // Update PID output limits
@@ -547,26 +606,65 @@ void processCalibrationCommand(String command) {
       
       saveCalibrationData();
       dualPrintln("Maximum position set to: " + String(max_position) + "° (servo moved for confirmation)");
-      if (neutral_position != command.substring(8).toInt()) {
-        dualPrintln("Neutral position adjusted to: " + String(neutral_position) + "°");
+      if (adjusted) {
+        dualPrintln("Neutral positions adjusted - Manual: " + String(manual_neutral_position) + "°, Auto: " + String(auto_neutral_position) + "°");
       }
     } else {
       dualPrintln("Invalid maximum position. Must be 0-180 and greater than min position (" + String(min_position) + ")");
     }
   }
   else if (command.startsWith("set_neutral ")) {
+    // Legacy command for backward compatibility - sets both manual and auto neutral to the same value
     int value = command.substring(12).toInt();
     if (value >= min_position && value <= max_position) {
-      neutral_position = value;
+      manual_neutral_position = value;
+      auto_neutral_position = value;
       
       // Move servo to new position for visual confirmation
-      servoPosition = applyCalibration(neutral_position);
+      servoPosition = applyCalibration(value);
       clutchServo.write(servoPosition);
       
       saveCalibrationData();
-      dualPrintln("Neutral position set to: " + String(neutral_position) + "° (servo moved for confirmation)");
+      dualPrintln("Neutral position set to: " + String(value) + "° for both manual and auto modes (servo moved for confirmation)");
+      dualPrintln("Note: Use 'set_manual_neutral' and 'set_auto_neutral' for separate control");
     } else {
       dualPrintln("Invalid neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_manual_neutral ")) {
+    int value = command.substring(19).toInt();
+    if (value >= min_position && value <= max_position) {
+      manual_neutral_position = value;
+      
+      // Move servo to new position for visual confirmation if in manual mode
+      if (!systemArmed) {
+        servoPosition = applyCalibration(manual_neutral_position);
+        clutchServo.write(servoPosition);
+      }
+      
+      saveCalibrationData();
+      dualPrintln("Manual neutral position set to: " + String(manual_neutral_position) + "°" + 
+                 (systemArmed ? "" : " (servo moved for confirmation)"));
+    } else {
+      dualPrintln("Invalid manual neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_auto_neutral ")) {
+    int value = command.substring(17).toInt();
+    if (value >= min_position && value <= max_position) {
+      auto_neutral_position = value;
+      
+      // Move servo to new position for visual confirmation if in auto mode
+      if (systemArmed) {
+        servoPosition = applyCalibration(auto_neutral_position);
+        clutchServo.write(servoPosition);
+      }
+      
+      saveCalibrationData();
+      dualPrintln("Auto neutral position set to: " + String(auto_neutral_position) + "°" + 
+                 (systemArmed ? " (servo moved for confirmation)" : ""));
+    } else {
+      dualPrintln("Invalid auto neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
     }
   }
   else if (command.startsWith("direction ")) {
@@ -585,7 +683,7 @@ void processCalibrationCommand(String command) {
     }
   }
   else {
-    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, direction");
+    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, set_manual_neutral, set_auto_neutral, direction");
   }
 }
 
@@ -605,7 +703,8 @@ void printCalibrationStatus() {
   dualPrintln("=== Calibration Status ===");
   dualPrintln("Minimum Position: " + String(min_position) + "°");
   dualPrintln("Maximum Position: " + String(max_position) + "°");
-  dualPrintln("Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("Manual Neutral Position: " + String(manual_neutral_position) + "°");
+  dualPrintln("Auto Neutral Position: " + String(auto_neutral_position) + "°");
   dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln("===========================");
 }
