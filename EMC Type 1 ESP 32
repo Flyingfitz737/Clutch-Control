@@ -151,8 +151,8 @@ void setup() {
   Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
   Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
   Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
-  Serial.println("  calibrate pot_min  - Set min pot value (adjust pot to min, then run)");
-  Serial.println("  calibrate pot_max  - Set max pot value (adjust pot to max, then run)");
+  Serial.println("  calibrate pot_min              - Set min pot value (adjust pot to min, then run)");
+  Serial.println("  calibrate pot_max              - Set max pot value (adjust pot to max, then run)");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
   Serial.println("========================================");
@@ -462,8 +462,8 @@ void printHelp() {
   dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
   dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
   dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
-  dualPrintln("calibrate pot_min  - Set min pot value (adjust pot to min, then run)");
-  dualPrintln("calibrate pot_max  - Set max pot value (adjust pot to max, then run)");
+  dualPrintln("calibrate pot_min              - Set min pot value (adjust pot to min, then run)");
+  dualPrintln("calibrate pot_max              - Set max pot value (adjust pot to max, then run)");
   dualPrintln("status             - Show detailed status");
   dualPrintln("help               - Show this help");
   dualPrintln("");
