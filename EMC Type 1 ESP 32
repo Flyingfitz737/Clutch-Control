@@ -42,6 +42,10 @@ int max_position = 180;             // Maximum servo position (0-180)
 int neutral_position = 90;          // Neutral servo position (0-180)
 bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
 
+// Potentiometer endpoint calibration
+int min_pot_value = 0;              // Calibrated minimum potentiometer value (0-4095)
+int max_pot_value = 4095;           // Calibrated maximum potentiometer value (0-4095)
+
 // Preferences object for non-volatile storage (ESP32)
 Preferences preferences;
 
@@ -147,6 +151,8 @@ void setup() {
   Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
   Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
   Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  Serial.println("  calibrate pot_min  - Set min pot value (adjust pot to min, then run)");
+  Serial.println("  calibrate pot_max  - Set max pot value (adjust pot to max, then run)");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
   Serial.println("========================================");
@@ -366,8 +372,10 @@ void runPIDControl() {
 }
 
 void runManualControl() {
-  // Map potentiometer value (0-4095 for ESP32 12-bit ADC) to servo position with calibration
-  int rawPosition = map(manualPotValue, 0, 4095, min_position, max_position);
+  // Map potentiometer value from calibrated range to servo position with calibration
+  // Constrain the manual pot value to the calibrated range
+  int constrainedPotValue = constrain(manualPotValue, min_pot_value, max_pot_value);
+  int rawPosition = map(constrainedPotValue, min_pot_value, max_pot_value, min_position, max_position);
   servoPosition = applyCalibration(rawPosition);
   clutchServo.write(servoPosition);
 }
@@ -431,6 +439,8 @@ void printDetailedStatus() {
   dualPrintln("  Max Position: " + String(max_position) + "°");
   dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
   dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  dualPrintln("  Min Pot Value: " + String(min_pot_value));
+  dualPrintln("  Max Pot Value: " + String(max_pot_value));
   dualPrintln();
   
   dualPrintln("System State:");
@@ -452,6 +462,8 @@ void printHelp() {
   dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
   dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
   dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  dualPrintln("calibrate pot_min  - Set min pot value (adjust pot to min, then run)");
+  dualPrintln("calibrate pot_max  - Set max pot value (adjust pot to max, then run)");
   dualPrintln("status             - Show detailed status");
   dualPrintln("help               - Show this help");
   dualPrintln("");
@@ -463,6 +475,7 @@ void printHelp() {
   dualPrintln("  All servo positions are constrained to min/max range");
   dualPrintln("  Neutral position is used as default startup position");
   dualPrintln("  Direction setting reverses servo travel if needed");
+  dualPrintln("  Potentiometer endpoints define the physical range of the pot");
   dualPrintln("  Calibration data is saved to Preferences automatically");
   dualPrintln("=======================================");
 }
@@ -478,10 +491,23 @@ void loadCalibrationData() {
   neutral_position = preferences.getInt("neutral_pos", 90);
   direction_reversed = preferences.getBool("direction", false);
   
+  // Load potentiometer endpoint calibration
+  min_pot_value = preferences.getInt("min_pot", 0);
+  max_pot_value = preferences.getInt("max_pot", 4095);
+  
   // Validate loaded data
   min_position = constrain(min_position, 0, 180);
   max_position = constrain(max_position, 0, 180);
   neutral_position = constrain(neutral_position, min_position, max_position);
+  
+  // Validate potentiometer endpoints
+  min_pot_value = constrain(min_pot_value, 0, 4095);
+  max_pot_value = constrain(max_pot_value, 0, 4095);
+  // Ensure min is less than max
+  if (min_pot_value >= max_pot_value) {
+    min_pot_value = 0;
+    max_pot_value = 4095;
+  }
   
   preferences.end();
   
@@ -495,6 +521,10 @@ void saveCalibrationData() {
   preferences.putInt("max_pos", max_position);
   preferences.putInt("neutral_pos", neutral_position);
   preferences.putBool("direction", direction_reversed);
+  
+  // Save potentiometer endpoint calibration
+  preferences.putInt("min_pot", min_pot_value);
+  preferences.putInt("max_pot", max_pot_value);
   
   preferences.end();
   
@@ -583,8 +613,36 @@ void processCalibrationCommand(String command) {
       dualPrintln("Invalid direction value. Use 0 for normal or 1 for reversed");
     }
   }
+  else if (command.startsWith("pot_min")) {
+    // Set minimum potentiometer endpoint using current reading
+    min_pot_value = manualPotValue;
+    
+    // Validate that min is less than max
+    if (min_pot_value >= max_pot_value) {
+      dualPrintln("Error: Minimum pot value (" + String(min_pot_value) + ") must be less than maximum (" + String(max_pot_value) + ")");
+      dualPrintln("Current calibration not changed.");
+    } else {
+      saveCalibrationData();
+      dualPrintln("Minimum potentiometer value set to: " + String(min_pot_value));
+      dualPrintln("Potentiometer range: " + String(min_pot_value) + " to " + String(max_pot_value));
+    }
+  }
+  else if (command.startsWith("pot_max")) {
+    // Set maximum potentiometer endpoint using current reading
+    max_pot_value = manualPotValue;
+    
+    // Validate that max is greater than min
+    if (max_pot_value <= min_pot_value) {
+      dualPrintln("Error: Maximum pot value (" + String(max_pot_value) + ") must be greater than minimum (" + String(min_pot_value) + ")");
+      dualPrintln("Current calibration not changed.");
+    } else {
+      saveCalibrationData();
+      dualPrintln("Maximum potentiometer value set to: " + String(max_pot_value));
+      dualPrintln("Potentiometer range: " + String(min_pot_value) + " to " + String(max_pot_value));
+    }
+  }
   else {
-    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, direction");
+    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, direction, pot_min, pot_max");
   }
 }
 
@@ -606,5 +664,7 @@ void printCalibrationStatus() {
   dualPrintln("Maximum Position: " + String(max_position) + "°");
   dualPrintln("Neutral Position: " + String(neutral_position) + "°");
   dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  dualPrintln("Min Pot Value: " + String(min_pot_value));
+  dualPrintln("Max Pot Value: " + String(max_pot_value));
   dualPrintln("===========================");
 }
