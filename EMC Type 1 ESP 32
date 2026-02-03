@@ -42,6 +42,12 @@ int max_position = 180;             // Maximum servo position (0-180)
 int neutral_position = 90;          // Neutral servo position (0-180)
 bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
 
+// Feedforward parameter for PID control
+// Provides a base control signal to give the feedback loop a head start
+// Range: 0-100 (percentage of full scale), Default: 50 (midpoint)
+// The feedforward gain is combined with PID output to improve response time
+int feedforward_gain = 50;          // Feedforward gain (0-100, default at midpoint)
+
 // Preferences object for non-volatile storage (ESP32)
 Preferences preferences;
 
@@ -143,10 +149,11 @@ void setup() {
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
   Serial.println("  arm                - Arm the system (automatic mode)");
   Serial.println("  disarm             - Disarm the system (manual mode)");
-  Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
-  Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
-  Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
-  Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  Serial.println("  calibrate set_min <value>        - Set minimum servo position (0-180)");
+  Serial.println("  calibrate set_max <value>        - Set maximum servo position (0-180)");
+  Serial.println("  calibrate set_neutral <value>    - Set neutral servo position (0-180)");
+  Serial.println("  calibrate set_feedforward <value> - Set feedforward gain (0-100%)");
+  Serial.println("  calibrate direction <0|1>        - Set direction (0=normal, 1=reversed)");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
   Serial.println("========================================");
@@ -358,8 +365,18 @@ void updateSystemState() {
 void runPIDControl() {
   // Compute PID output
   if (myPID.Compute()) {
-    // Map PID output to servo position with calibration
-    servoPosition = (int)pidOutput;
+    // Calculate feedforward term as a percentage of the servo range
+    // Feedforward provides a base control signal proportional to the setpoint
+    // This gives the feedback loop a head start, improving response time
+    double feedforwardTerm = (feedforward_gain / 100.0) * (max_position - min_position) + min_position;
+    
+    // Combine PID output with feedforward term
+    // PID output already ranges from min_position to max_position
+    // We blend them to get final servo signal
+    double combinedOutput = pidOutput + (feedforwardTerm - neutral_position);
+    
+    // Constrain combined output to valid servo range
+    servoPosition = (int)constrain(combinedOutput, min_position, max_position);
     servoPosition = applyCalibration(servoPosition);
     clutchServo.write(servoPosition);
   }
@@ -430,6 +447,7 @@ void printDetailedStatus() {
   dualPrintln("  Min Position: " + String(min_position) + "°");
   dualPrintln("  Max Position: " + String(max_position) + "°");
   dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("  Feedforward Gain: " + String(feedforward_gain) + "%");
   dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln();
   
@@ -448,10 +466,11 @@ void printHelp() {
   dualPrintln("setpid <kp> <ki> <kd> - Set PID constants");
   dualPrintln("arm                - Arm system (automatic PID mode)");
   dualPrintln("disarm             - Disarm system (manual control mode)");
-  dualPrintln("calibrate set_min <value>     - Set minimum servo position (0-180)");
-  dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
-  dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
-  dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  dualPrintln("calibrate set_min <value>        - Set minimum servo position (0-180)");
+  dualPrintln("calibrate set_max <value>        - Set maximum servo position (0-180)");
+  dualPrintln("calibrate set_neutral <value>    - Set neutral servo position (0-180)");
+  dualPrintln("calibrate set_feedforward <value> - Set feedforward gain (0-100%)");
+  dualPrintln("calibrate direction <0|1>        - Set direction (0=normal, 1=reversed)");
   dualPrintln("status             - Show detailed status");
   dualPrintln("help               - Show this help");
   dualPrintln("");
@@ -463,6 +482,9 @@ void printHelp() {
   dualPrintln("  All servo positions are constrained to min/max range");
   dualPrintln("  Neutral position is used as default startup position");
   dualPrintln("  Direction setting reverses servo travel if needed");
+  dualPrintln("  Feedforward gain (0-100%) provides a base control signal");
+  dualPrintln("    that helps the PID loop respond faster by giving it a");
+  dualPrintln("    head start. Set to 50% (default) for balanced response.");
   dualPrintln("  Calibration data is saved to Preferences automatically");
   dualPrintln("=======================================");
 }
@@ -477,11 +499,13 @@ void loadCalibrationData() {
   max_position = preferences.getInt("max_pos", 180);
   neutral_position = preferences.getInt("neutral_pos", 90);
   direction_reversed = preferences.getBool("direction", false);
+  feedforward_gain = preferences.getInt("ff_gain", 50);
   
   // Validate loaded data
   min_position = constrain(min_position, 0, 180);
   max_position = constrain(max_position, 0, 180);
   neutral_position = constrain(neutral_position, min_position, max_position);
+  feedforward_gain = constrain(feedforward_gain, 0, 100);
   
   preferences.end();
   
@@ -495,6 +519,7 @@ void saveCalibrationData() {
   preferences.putInt("max_pos", max_position);
   preferences.putInt("neutral_pos", neutral_position);
   preferences.putBool("direction", direction_reversed);
+  preferences.putInt("ff_gain", feedforward_gain);
   
   preferences.end();
   
@@ -568,6 +593,17 @@ void processCalibrationCommand(String command) {
       dualPrintln("Invalid neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
     }
   }
+  else if (command.startsWith("set_feedforward ")) {
+    int value = command.substring(16).toInt();
+    if (value >= 0 && value <= 100) {
+      feedforward_gain = value;
+      saveCalibrationData();
+      dualPrintln("Feedforward gain set to: " + String(feedforward_gain) + "%");
+      dualPrintln("This provides a base control signal to help the PID loop respond faster");
+    } else {
+      dualPrintln("Invalid feedforward gain. Must be 0-100 (percentage)");
+    }
+  }
   else if (command.startsWith("direction ")) {
     int value = command.substring(10).toInt();
     if (value == 0 || value == 1) {
@@ -584,7 +620,7 @@ void processCalibrationCommand(String command) {
     }
   }
   else {
-    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, direction");
+    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, set_feedforward, direction");
   }
 }
 
@@ -605,6 +641,7 @@ void printCalibrationStatus() {
   dualPrintln("Minimum Position: " + String(min_position) + "°");
   dualPrintln("Maximum Position: " + String(max_position) + "°");
   dualPrintln("Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("Feedforward Gain: " + String(feedforward_gain) + "%");
   dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln("===========================");
 }
