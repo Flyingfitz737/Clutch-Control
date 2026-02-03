@@ -68,7 +68,7 @@ bool ledState = false;
 // Safety override system variables
 int overrideThreshold = 3500;       // Default threshold for potentiometer value (0-4095 for 12-bit ADC)
 bool overrideEnabled = false;       // Safety override feature enabled/disabled
-bool safetyOverrideTriggered = false; // Flag indicating safety override has been triggered
+bool safetyOverrideActive = false;  // Flag indicating safety override is active (requires rearm toggle)
 bool armSwitchPreviousState = false; // Track arm switch state for toggle detection
 
 // PID Control Variables
@@ -335,19 +335,7 @@ void processCommand(String command) {
     processSafetyCommand(command.substring(7));
   }
   else if (command == "arm") {
-    // Check if safety override is triggered and potentiometer is above threshold
-    if (safetyOverrideTriggered) {
-      if (manualPotValue <= overrideThreshold) {
-        systemArmed = true;
-        safetyOverrideTriggered = false; // Clear override flag
-        dualPrintln("System ARMED - Automatic PID Control Mode");
-      } else {
-        dualPrintln("Cannot arm: Safety override active - Potentiometer above threshold (" + String(manualPotValue) + " > " + String(overrideThreshold) + ")");
-      }
-    } else {
-      systemArmed = true;
-      dualPrintln("System ARMED - Automatic PID Control Mode");
-    }
+    attemptArm();
   }
   else if (command == "disarm") {
     systemArmed = false;
@@ -372,14 +360,14 @@ void updateSystemState() {
   // Safety override logic (only active when enabled)
   if (overrideEnabled && systemArmed) {
     // Check if potentiometer exceeds threshold while armed
-    if (manualPotValue > overrideThreshold && !safetyOverrideTriggered) {
+    if (manualPotValue > overrideThreshold && !safetyOverrideActive) {
       // Trigger safety override
-      safetyOverrideTriggered = true;
+      safetyOverrideActive = true;
       dualPrintln("SAFETY OVERRIDE TRIGGERED - Potentiometer exceeded threshold!");
     }
     
     // If safety override was triggered and potentiometer is now below threshold
-    if (safetyOverrideTriggered && manualPotValue <= overrideThreshold) {
+    if (safetyOverrideActive && manualPotValue <= overrideThreshold) {
       // Automatically disarm and switch to manual mode
       systemArmed = false;
       dualPrintln("SAFETY OVERRIDE ACTIVE - System disarmed, returning to manual mode");
@@ -390,20 +378,7 @@ void updateSystemState() {
   // Handle arm switch state changes
   if (armSwitchCurrentState && !armSwitchPreviousState) {
     // Arm switch just turned ON (rising edge)
-    if (safetyOverrideTriggered) {
-      // Check if potentiometer is below threshold before allowing rearm
-      if (manualPotValue <= overrideThreshold) {
-        systemArmed = true;
-        safetyOverrideTriggered = false; // Clear override flag
-        dualPrintln("System ARMED via switch - Automatic PID Control Mode");
-      } else {
-        dualPrintln("Cannot arm: Potentiometer above threshold (" + String(manualPotValue) + " > " + String(overrideThreshold) + ")");
-      }
-    } else {
-      // Normal arming (no override condition)
-      systemArmed = true;
-      dualPrintln("System ARMED via switch - Automatic PID Control Mode");
-    }
+    attemptArm();
   } else if (!armSwitchCurrentState && armSwitchPreviousState) {
     // Arm switch just turned OFF (falling edge)
     if (systemArmed) {
@@ -414,6 +389,27 @@ void updateSystemState() {
   
   // Update previous arm switch state
   armSwitchPreviousState = armSwitchCurrentState;
+}
+
+// Helper function to attempt arming the system with safety checks
+bool attemptArm() {
+  // Check if safety override is active and potentiometer is above threshold
+  if (safetyOverrideActive) {
+    if (manualPotValue <= overrideThreshold) {
+      systemArmed = true;
+      safetyOverrideActive = false; // Clear override flag
+      dualPrintln("System ARMED - Automatic PID Control Mode");
+      return true;
+    } else {
+      dualPrintln("Cannot arm: Potentiometer above threshold (" + String(manualPotValue) + " > " + String(overrideThreshold) + ")");
+      return false;
+    }
+  } else {
+    // Normal arming (no override condition)
+    systemArmed = true;
+    dualPrintln("System ARMED - Automatic PID Control Mode");
+    return true;
+  }
 }
 
 void runPIDControl() {
@@ -440,7 +436,7 @@ void updateOutputs() {
     digitalWrite(armLightPin, HIGH);
   } else {
     // Determine flash interval based on safety override state
-    unsigned long flashInterval = safetyOverrideTriggered ? ledFlashIntervalOverride : ledFlashInterval;
+    unsigned long flashInterval = safetyOverrideActive ? ledFlashIntervalOverride : ledFlashInterval;
     
     // Flashing when disarmed (manual mode) or safety override
     unsigned long currentTime = millis();
@@ -500,7 +496,7 @@ void printDetailedStatus() {
   dualPrintln("Safety Override Settings:");
   dualPrintln("  Enabled: " + String(overrideEnabled ? "YES" : "NO"));
   dualPrintln("  Threshold: " + String(overrideThreshold) + " (range: 0-4095)");
-  dualPrintln("  Override Triggered: " + String(safetyOverrideTriggered ? "YES" : "NO"));
+  dualPrintln("  Override Active: " + String(safetyOverrideActive ? "YES" : "NO"));
   dualPrintln();
   
   dualPrintln("System State:");
@@ -699,7 +695,7 @@ void processSafetyCommand(String command) {
   }
   else if (command == "disable") {
     overrideEnabled = false;
-    safetyOverrideTriggered = false; // Clear any active override
+    safetyOverrideActive = false; // Clear any active override
     saveCalibrationData();
     dualPrintln("Safety override DISABLED");
   }
