@@ -335,8 +335,19 @@ void processCommand(String command) {
     processSafetyCommand(command.substring(7));
   }
   else if (command == "arm") {
-    systemArmed = true;
-    dualPrintln("System ARMED - Automatic PID Control Mode");
+    // Check if safety override is triggered and potentiometer is above threshold
+    if (safetyOverrideTriggered) {
+      if (manualPotValue <= overrideThreshold) {
+        systemArmed = true;
+        safetyOverrideTriggered = false; // Clear override flag
+        dualPrintln("System ARMED - Automatic PID Control Mode");
+      } else {
+        dualPrintln("Cannot arm: Safety override active - Potentiometer above threshold (" + String(manualPotValue) + " > " + String(overrideThreshold) + ")");
+      }
+    } else {
+      systemArmed = true;
+      dualPrintln("System ARMED - Automatic PID Control Mode");
+    }
   }
   else if (command == "disarm") {
     systemArmed = false;
