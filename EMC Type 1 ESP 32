@@ -365,15 +365,20 @@ void updateSystemState() {
 void runPIDControl() {
   // Compute PID output
   if (myPID.Compute()) {
-    // Calculate feedforward term as a percentage of the servo range
-    // Feedforward provides a base control signal proportional to the setpoint
-    // This gives the feedback loop a head start, improving response time
-    double feedforwardTerm = (feedforward_gain / 100.0) * (max_position - min_position) + min_position;
+    // Calculate feedforward term proportional to the setpoint RPM
+    // Feedforward provides an anticipatory control signal based on the desired state
+    // This gives the feedback loop a head start by estimating the needed servo position
+    // The feedforward_gain (0-100%) scales how much of the estimated position to apply
+    double normalizedSetpoint = (setpointRPM - 0.0) / 10000.0; // Normalize RPM to 0-1 range
+    double estimatedPosition = min_position + normalizedSetpoint * (max_position - min_position);
+    double feedforwardTerm = (feedforward_gain / 100.0) * estimatedPosition;
     
     // Combine PID output with feedforward term
-    // PID output already ranges from min_position to max_position
-    // We blend them to get final servo signal
-    double combinedOutput = pidOutput + (feedforwardTerm - neutral_position);
+    // At 0% feedforward: purely PID control
+    // At 100% feedforward: full anticipatory position added to PID correction
+    // The feedforward is blended with PID output proportionally
+    double pidCorrection = (1.0 - feedforward_gain / 100.0) * pidOutput;
+    double combinedOutput = pidCorrection + feedforwardTerm;
     
     // Constrain combined output to valid servo range
     servoPosition = (int)constrain(combinedOutput, min_position, max_position);
@@ -482,9 +487,10 @@ void printHelp() {
   dualPrintln("  All servo positions are constrained to min/max range");
   dualPrintln("  Neutral position is used as default startup position");
   dualPrintln("  Direction setting reverses servo travel if needed");
-  dualPrintln("  Feedforward gain (0-100%) provides a base control signal");
-  dualPrintln("    that helps the PID loop respond faster by giving it a");
-  dualPrintln("    head start. Set to 50% (default) for balanced response.");
+  dualPrintln("  Feedforward gain (0-100%) controls anticipatory response:");
+  dualPrintln("    0%: Pure PID feedback control (slower, more stable)");
+  dualPrintln("    50%: Balanced blend of feedforward and feedback (default)");
+  dualPrintln("    100%: Maximum feedforward (faster response, may oscillate)");
   dualPrintln("  Calibration data is saved to Preferences automatically");
   dualPrintln("=======================================");
 }
@@ -599,7 +605,15 @@ void processCalibrationCommand(String command) {
       feedforward_gain = value;
       saveCalibrationData();
       dualPrintln("Feedforward gain set to: " + String(feedforward_gain) + "%");
-      dualPrintln("This provides a base control signal to help the PID loop respond faster");
+      if (value == 0) {
+        dualPrintln("Pure PID feedback control - slower response, more stable");
+      } else if (value <= 30) {
+        dualPrintln("Low feedforward - emphasis on stability");
+      } else if (value <= 70) {
+        dualPrintln("Balanced feedforward and feedback - good starting point");
+      } else {
+        dualPrintln("High feedforward - faster response, may oscillate");
+      }
     } else {
       dualPrintln("Invalid feedforward gain. Must be 0-100 (percentage)");
     }
