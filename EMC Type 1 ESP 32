@@ -365,9 +365,8 @@ void updateSystemState() {
       safetyOverrideActive = true;
       dualPrintln("SAFETY OVERRIDE TRIGGERED - Potentiometer exceeded threshold!");
     }
-    
-    // If safety override was triggered and potentiometer is now below threshold
-    if (safetyOverrideActive && manualPotValue <= overrideThreshold) {
+    // If safety override was triggered and potentiometer is now below threshold, auto-disarm
+    else if (safetyOverrideActive && manualPotValue <= overrideThreshold) {
       // Automatically disarm and switch to manual mode
       systemArmed = false;
       dualPrintln("SAFETY OVERRIDE ACTIVE - System disarmed, returning to manual mode");
@@ -393,7 +392,7 @@ void updateSystemState() {
 
 // Helper function to attempt arming the system with safety checks
 bool attemptArm() {
-  // Check if safety override is active and potentiometer is above threshold
+  // Check if safety override is active - if so, verify pot is below threshold before allowing rearm
   if (safetyOverrideActive) {
     if (manualPotValue <= overrideThreshold) {
       systemArmed = true;
