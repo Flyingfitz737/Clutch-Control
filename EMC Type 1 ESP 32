@@ -40,6 +40,7 @@ const int armSwitchPin = 21;        // Digital pin for arm switch
 int min_position = 0;               // Minimum servo position (0-180)
 int max_position = 180;             // Maximum servo position (0-180)
 int neutral_position = 90;          // Neutral servo position (0-180)
+int armed_position = 90;            // Predefined servo position when armed (0-180)
 bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
 
 // Preferences object for non-volatile storage (ESP32)
@@ -58,6 +59,7 @@ int manualPotValue = 0;
 bool armSwitch = false;
 
 bool systemArmed = false;
+bool pidControlActive = false;      // Tracks if PID control is active after initial armed position
 
 // LED flashing variables for manual mode
 unsigned long lastLEDFlash = 0;
@@ -141,6 +143,7 @@ void setup() {
   Serial.println("Commands (via Serial or Bluetooth):");
   Serial.println("  setrpm <value>     - Set target RPM");
   Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
+  Serial.println("  setservo <value>   - Set predefined armed servo position");
   Serial.println("  arm                - Arm the system (automatic mode)");
   Serial.println("  disarm             - Disarm the system (manual mode)");
   Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
@@ -321,12 +324,25 @@ void processCommand(String command) {
   else if (command.startsWith("calibrate ")) {
     processCalibrationCommand(command.substring(10));
   }
+  else if (command.startsWith("setservo ")) {
+    int value = command.substring(9).toInt();
+    if (value >= min_position && value <= max_position) {
+      armed_position = value;
+      saveCalibrationData();
+      dualPrintln("Armed position set to: " + String(armed_position) + "°");
+      dualPrintln("Servo will move to this position when system is armed");
+    } else {
+      dualPrintln("Invalid armed position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
   else if (command == "arm") {
     systemArmed = true;
-    dualPrintln("System ARMED - Automatic PID Control Mode");
+    pidControlActive = false;  // Reset PID control flag
+    dualPrintln("System ARMED - Moving to predefined position before PID control");
   }
   else if (command == "disarm") {
     systemArmed = false;
+    pidControlActive = false;
     dualPrintln("System DISARMED - Manual Control Mode");
   }
   else if (command == "status") {
@@ -347,15 +363,25 @@ void updateSystemState() {
   
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
-    dualPrintln("System ARMED via switch - Automatic PID Control Mode");
+    pidControlActive = false;  // Reset PID control flag
+    dualPrintln("System ARMED via switch - Moving to predefined position before PID control");
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
+    pidControlActive = false;
     dualPrintln("System DISARMED via switch - Manual Control Mode");
   }
 }
 
 void runPIDControl() {
+  // If PID control is not yet active, move to predefined armed position first
+  if (!pidControlActive) {
+    servoPosition = applyCalibration(armed_position);
+    clutchServo.write(servoPosition);
+    pidControlActive = true;  // Enable PID control for next iteration
+    return;
+  }
+  
   // Compute PID output
   if (myPID.Compute()) {
     // Map PID output to servo position with calibration
@@ -430,6 +456,7 @@ void printDetailedStatus() {
   dualPrintln("  Min Position: " + String(min_position) + "°");
   dualPrintln("  Max Position: " + String(max_position) + "°");
   dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("  Armed Position: " + String(armed_position) + "°");
   dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln();
   
@@ -446,6 +473,7 @@ void printHelp() {
   dualPrintln("=== EMC Type 1 Controller Commands ===");
   dualPrintln("setrpm <value>     - Set target RPM (1-10000)");
   dualPrintln("setpid <kp> <ki> <kd> - Set PID constants");
+  dualPrintln("setservo <value>   - Set predefined armed servo position (0-180)");
   dualPrintln("arm                - Arm system (automatic PID mode)");
   dualPrintln("disarm             - Disarm system (manual control mode)");
   dualPrintln("calibrate set_min <value>     - Set minimum servo position (0-180)");
@@ -456,12 +484,13 @@ void printHelp() {
   dualPrintln("help               - Show this help");
   dualPrintln("");
   dualPrintln("MODES:");
-  dualPrintln("  AUTOMATIC: System armed, PID controls servo");
+  dualPrintln("  AUTOMATIC: System armed, servo moves to predefined position, then PID controls");
   dualPrintln("  MANUAL: System disarmed, pin 35 potentiometer controls servo");
   dualPrintln("");
   dualPrintln("CALIBRATION:");
   dualPrintln("  All servo positions are constrained to min/max range");
   dualPrintln("  Neutral position is used as default startup position");
+  dualPrintln("  Armed position is used when system transitions to armed mode");
   dualPrintln("  Direction setting reverses servo travel if needed");
   dualPrintln("  Calibration data is saved to Preferences automatically");
   dualPrintln("=======================================");
@@ -476,12 +505,14 @@ void loadCalibrationData() {
   min_position = preferences.getInt("min_pos", 0);
   max_position = preferences.getInt("max_pos", 180);
   neutral_position = preferences.getInt("neutral_pos", 90);
+  armed_position = preferences.getInt("armed_pos", 90);
   direction_reversed = preferences.getBool("direction", false);
   
   // Validate loaded data
   min_position = constrain(min_position, 0, 180);
   max_position = constrain(max_position, 0, 180);
   neutral_position = constrain(neutral_position, min_position, max_position);
+  armed_position = constrain(armed_position, min_position, max_position);
   
   preferences.end();
   
@@ -494,6 +525,7 @@ void saveCalibrationData() {
   preferences.putInt("min_pos", min_position);
   preferences.putInt("max_pos", max_position);
   preferences.putInt("neutral_pos", neutral_position);
+  preferences.putInt("armed_pos", armed_position);
   preferences.putBool("direction", direction_reversed);
   
   preferences.end();
@@ -605,6 +637,7 @@ void printCalibrationStatus() {
   dualPrintln("Minimum Position: " + String(min_position) + "°");
   dualPrintln("Maximum Position: " + String(max_position) + "°");
   dualPrintln("Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("Armed Position: " + String(armed_position) + "°");
   dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln("===========================");
 }
