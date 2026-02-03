@@ -337,12 +337,12 @@ void processCommand(String command) {
   }
   else if (command == "arm") {
     systemArmed = true;
-    pidControlActive = false;  // Reset PID control flag
+    pidControlActive = false;  // Set flag to apply armed position before PID takes over
     dualPrintln("System ARMED - Moving to predefined position before PID control");
   }
   else if (command == "disarm") {
     systemArmed = false;
-    pidControlActive = false;
+    pidControlActive = false;  // Reset flag for next arm cycle
     dualPrintln("System DISARMED - Manual Control Mode");
   }
   else if (command == "status") {
@@ -363,26 +363,27 @@ void updateSystemState() {
   
   if (shouldBeArmed && !systemArmed) {
     systemArmed = true;
-    pidControlActive = false;  // Reset PID control flag
+    pidControlActive = false;  // Set flag to apply armed position before PID takes over
     dualPrintln("System ARMED via switch - Moving to predefined position before PID control");
   } else if (!shouldBeArmed && systemArmed && !armSwitch) {
     // Only disarm if switch is released and not armed via serial
     systemArmed = false;
-    pidControlActive = false;
+    pidControlActive = false;  // Reset flag for next arm cycle
     dualPrintln("System DISARMED via switch - Manual Control Mode");
   }
 }
 
 void runPIDControl() {
-  // If PID control is not yet active, move to predefined armed position first
+  // On first call after arming, move servo to predefined armed position
+  // This allows user to set a known starting point before PID control begins
   if (!pidControlActive) {
-    servoPosition = applyCalibration(armed_position);
+    servoPosition = applyCalibration(armed_position);  // Apply direction reversal if configured
     clutchServo.write(servoPosition);
-    pidControlActive = true;  // Enable PID control for next iteration
+    pidControlActive = true;  // Enable PID control for subsequent calls
     return;
   }
   
-  // Compute PID output
+  // Normal PID control - compute and apply PID output
   if (myPID.Compute()) {
     // Map PID output to servo position with calibration
     servoPosition = (int)pidOutput;
