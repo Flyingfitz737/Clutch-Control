@@ -40,6 +40,7 @@ const int armSwitchPin = 21;        // Digital pin for arm switch
 int min_position = 0;               // Minimum servo position (0-180)
 int max_position = 180;             // Maximum servo position (0-180)
 int neutral_position = 90;          // Neutral servo position (0-180)
+int preposition = 90;               // Servo preposition when armed (0-180)
 bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
 
 // Preferences object for non-volatile storage (ESP32)
@@ -153,6 +154,7 @@ void setup() {
   Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
   Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
   Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("  calibrate set_preposition <value> - Set preposition servo position (0-180)");
   Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
   Serial.println("  safety enable      - Enable safety override system");
   Serial.println("  safety disable     - Disable safety override system");
@@ -395,6 +397,7 @@ bool attemptArm() {
   // Check if safety override is active - if so, verify pot is below threshold before allowing rearm
   if (safetyOverrideActive) {
     if (manualPotValue <= overrideThreshold) {
+      moveServoToPreposition();
       systemArmed = true;
       safetyOverrideActive = false; // Clear override flag
       dualPrintln("System ARMED - Automatic PID Control Mode");
@@ -405,10 +408,18 @@ bool attemptArm() {
     }
   } else {
     // Normal arming (no override condition)
+    moveServoToPreposition();
     systemArmed = true;
     dualPrintln("System ARMED - Automatic PID Control Mode");
     return true;
   }
+}
+
+// Helper function to move servo to preposition when arming
+void moveServoToPreposition() {
+  servoPosition = applyCalibration(preposition);
+  clutchServo.write(servoPosition);
+  dualPrintln("Servo moved to preposition: " + String(preposition) + "°");
 }
 
 void runPIDControl() {
@@ -489,6 +500,7 @@ void printDetailedStatus() {
   dualPrintln("  Min Position: " + String(min_position) + "°");
   dualPrintln("  Max Position: " + String(max_position) + "°");
   dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("  Preposition: " + String(preposition) + "°");
   dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln();
   
@@ -516,6 +528,7 @@ void printHelp() {
   dualPrintln("calibrate set_min <value>     - Set minimum servo position (0-180)");
   dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
   dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  dualPrintln("calibrate set_preposition <value> - Set preposition servo position (0-180)");
   dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
   dualPrintln("safety enable      - Enable safety override system");
   dualPrintln("safety disable     - Disable safety override system");
@@ -535,6 +548,7 @@ void printHelp() {
   dualPrintln("CALIBRATION:");
   dualPrintln("  All servo positions are constrained to min/max range");
   dualPrintln("  Neutral position is used as default startup position");
+  dualPrintln("  Preposition is where servo moves when system is armed");
   dualPrintln("  Direction setting reverses servo travel if needed");
   dualPrintln("  Calibration data is saved to Preferences automatically");
   dualPrintln("=======================================");
@@ -549,6 +563,7 @@ void loadCalibrationData() {
   min_position = preferences.getInt("min_pos", 0);
   max_position = preferences.getInt("max_pos", 180);
   neutral_position = preferences.getInt("neutral_pos", 90);
+  preposition = preferences.getInt("preposition", 90);
   direction_reversed = preferences.getBool("direction", false);
   
   // Load safety override settings with defaults
@@ -559,6 +574,7 @@ void loadCalibrationData() {
   min_position = constrain(min_position, 0, 180);
   max_position = constrain(max_position, 0, 180);
   neutral_position = constrain(neutral_position, min_position, max_position);
+  preposition = constrain(preposition, min_position, max_position);
   overrideThreshold = constrain(overrideThreshold, 0, 4095);
   
   preferences.end();
@@ -572,6 +588,7 @@ void saveCalibrationData() {
   preferences.putInt("min_pos", min_position);
   preferences.putInt("max_pos", max_position);
   preferences.putInt("neutral_pos", neutral_position);
+  preferences.putInt("preposition", preposition);
   preferences.putBool("direction", direction_reversed);
   
   // Save safety override settings
@@ -650,6 +667,21 @@ void processCalibrationCommand(String command) {
       dualPrintln("Invalid neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
     }
   }
+  else if (command.startsWith("set_preposition ")) {
+    int value = command.substring(16).toInt();
+    if (value >= min_position && value <= max_position) {
+      preposition = value;
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(preposition);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      dualPrintln("Preposition set to: " + String(preposition) + "° (servo moved for confirmation)");
+    } else {
+      dualPrintln("Invalid preposition. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
   else if (command.startsWith("direction ")) {
     int value = command.substring(10).toInt();
     if (value == 0 || value == 1) {
@@ -666,7 +698,7 @@ void processCalibrationCommand(String command) {
     }
   }
   else {
-    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, direction");
+    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, set_preposition, direction");
   }
 }
 
@@ -718,6 +750,7 @@ void printCalibrationStatus() {
   dualPrintln("Minimum Position: " + String(min_position) + "°");
   dualPrintln("Maximum Position: " + String(max_position) + "°");
   dualPrintln("Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("Preposition: " + String(preposition) + "°");
   dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln("===========================");
 }
