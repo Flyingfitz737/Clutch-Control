@@ -1,0 +1,756 @@
+#include <Arduino.h>
+#include <PID_v1.h>
+#include <ESP32Servo.h>  // ESP32-specific servo library
+#include "BluetoothSerial.h"  // Bluetooth Classic library
+#include <Preferences.h>  // ESP32 non-volatile storage library
+
+// ===== EMC Type 1 Controller for ESP32 =====
+// Hydraulic clutch controller with user-defined parameters,
+// automatic sensor inputs, PID control, LED feedback, and Bluetooth Classic communication
+//
+// Required Libraries for ESP32:
+// - PID_v1 (Arduino IDE Library Manager)
+// - ESP32Servo (Arduino IDE Library Manager)
+// - BluetoothSerial (included with ESP32 Core)
+//
+// Hardware Requirements:
+// - ESP32 development board
+// - RPM sensor connected to GPIO19
+// - Potentiometers connected to GPIO34 and GPIO35
+// - Servo motor connected to GPIO18
+// - Arm switch connected to GPIO21
+// - LED connected to GPIO2 (or use built-in LED)
+//
+// Bluetooth Features:
+// - Device name: "EMC_Type_1_Controller"
+// - Supports all serial commands: setrpm, setpid, arm, disarm, status, help
+// - Real-time status feedback over Bluetooth
+
+// ===== Pin Definitions =====
+const int rpmSensorPin = 19;        // Digital pin for RPM sensor pulse train (interrupt capable)
+const int potentiometerPin = 34;    // Analog input for additional potentiometer (ADC1_CH6)
+const int manualPotPin = 35;        // Analog input for manual servo control potentiometer (ADC1_CH7)
+const int servoPin = 18;            // PWM pin for servo motor control
+const int armLightPin = 2;          // LED pin for arming light (built-in LED on ESP32)
+const int armSwitchPin = 21;        // Digital pin for arm switch
+
+
+// ===== Global Variables =====
+// Calibration parameters
+int min_position = 0;               // Minimum servo position (0-180)
+int max_position = 180;             // Maximum servo position (0-180)
+int neutral_position = 90;          // Neutral servo position (0-180)
+int preposition = 90;               // Servo preposition when armed (0-180)
+bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
+
+// Preferences object for non-volatile storage (ESP32)
+Preferences preferences;
+
+// RPM pulse counting variables (volatile for ISR)
+volatile unsigned long pulseCount = 0;
+volatile unsigned long lastPulseTime = 0;
+unsigned long lastRPMCalculation = 0;
+const unsigned long rpmCalculationInterval = 1000; // Calculate RPM every 1000ms
+const int pulsesPerRevolution = 1; // Assuming 1 pulse per revolution for ECU signal
+
+// Sensor readings
+int potValue = 0;
+int manualPotValue = 0;
+bool armSwitch = false;
+
+bool systemArmed = false;
+
+// LED flashing variables for manual mode
+unsigned long lastLEDFlash = 0;
+const unsigned long ledFlashInterval = 500; // Flash every 500ms
+const unsigned long ledFlashIntervalOverride = 250; // Faster flash for safety override (250ms)
+bool ledState = false;
+
+// Safety override system variables
+int overrideThreshold = 3500;       // Default threshold for potentiometer value (0-4095 for 12-bit ADC)
+bool overrideEnabled = false;       // Safety override feature enabled/disabled
+bool safetyOverrideActive = false;  // Flag indicating safety override is active (requires rearm toggle)
+bool armSwitchPreviousState = false; // Track arm switch state for toggle detection
+
+// PID Control Variables
+double setpointRPM = 1000.0;        // Target RPM (user-configurable)
+double currentRPM = 0.0;            // Current RPM from sensor
+double pidOutput = 0.0;             // PID output (0-255 for PWM)
+double Kp = 2.0, Ki = 5.0, Kd = 1.0; // PID constants (user-configurable)
+
+// Servo control
+Servo clutchServo;
+int servoPosition = 90;             // Servo position (0-180 degrees)
+
+// PID Controller
+PID myPID(&currentRPM, &pidOutput, &setpointRPM, Kp, Ki, Kd, DIRECT);
+
+// Serial communication variables
+String inputString = "";
+bool stringComplete = false;
+
+// Bluetooth communication variables
+BluetoothSerial SerialBT;
+String btInputString = "";
+bool btStringComplete = false;
+
+// Timing variables
+unsigned long lastPrintTime = 0;
+const unsigned long printInterval = 500; // Print status every 500ms
+
+// ===== Setup Function =====
+void setup() {
+  Serial.begin(115200); // Higher baud rate for ESP32
+  
+  // Load calibration data from Preferences
+  loadCalibrationData();
+  
+  // Initialize Bluetooth Classic
+  SerialBT.begin("EMC_Type_1_Controller"); // Bluetooth device name
+  Serial.println("Bluetooth initialized. Device name: EMC_Type_1_Controller");
+  
+  // Initialize pin modes
+  pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
+  pinMode(potentiometerPin, INPUT);
+  pinMode(manualPotPin, INPUT);
+  pinMode(armLightPin, OUTPUT);
+  pinMode(armSwitchPin, INPUT_PULLUP);
+
+  // Configure ADC resolution for ESP32 (12-bit by default)
+  analogReadResolution(12); // ESP32 supports 12-bit ADC (0-4095)
+
+  // Setup interrupt for RPM pulse counting (falling edge detection)
+  attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulseISR, FALLING);
+  
+  // Initialize timing variables
+  lastRPMCalculation = millis();
+  
+  // Initialize servo
+  clutchServo.attach(servoPin);
+  servoPosition = neutral_position;  // Use calibrated neutral position
+  clutchServo.write(servoPosition);
+  
+  // Initialize PID controller
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(min_position, max_position); // Use calibrated range
+  
+  // Initialize outputs
+  digitalWrite(armLightPin, LOW);
+  
+  // Reserve string space for serial input
+  inputString.reserve(200);
+  btInputString.reserve(200);
+  
+  // Print startup message
+  Serial.println("=== EMC Type 1 Controller Initialized (ESP32) ===");
+  Serial.println("Bluetooth Device Name: EMC_Type_1_Controller");
+  Serial.println("RPM Input: Digital pulse train on pin 19 (interrupt)");
+  Serial.println("Manual Control: Potentiometer on pin 35");
+  Serial.println("Commands (via Serial or Bluetooth):");
+  Serial.println("  setrpm <value>     - Set target RPM");
+  Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
+  Serial.println("  arm                - Arm the system (automatic mode)");
+  Serial.println("  disarm             - Disarm the system (manual mode)");
+  Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
+  Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
+  Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("  calibrate set_preposition <value> - Set preposition servo position (0-180)");
+  Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  Serial.println("  safety enable      - Enable safety override system");
+  Serial.println("  safety disable     - Disable safety override system");
+  Serial.println("  safety set_threshold <value> - Set override threshold (0-4095)");
+  Serial.println("  status             - Show current status");
+  Serial.println("  help               - Show this help");
+  Serial.println("========================================");
+  printCalibrationStatus();
+  printStatus();
+}
+
+// ===== Bluetooth Helper Functions =====
+void dualPrint(String message) {
+  Serial.print(message);
+  SerialBT.print(message);
+}
+
+void dualPrintln(String message) {
+  Serial.println(message);
+  SerialBT.println(message);
+}
+
+void dualPrintln() {
+  Serial.println();
+  SerialBT.println();
+}
+
+// ===== Main Loop =====
+void loop() {
+  // Read sensor inputs
+  readSensors();
+  
+  // Process serial and Bluetooth commands
+  processInput();
+  
+  // Update system state
+  updateSystemState();
+  
+  // Run PID control if armed (automatic mode)
+  if (systemArmed) {
+    runPIDControl();
+  } else {
+    // Manual servo control when disarmed
+    runManualControl();
+  }
+  
+  // Update outputs
+  updateOutputs();
+  
+  // Print status periodically
+  if (millis() - lastPrintTime >= printInterval) {
+    printStatus();
+    lastPrintTime = millis();
+  }
+  
+  delay(50); // Small delay for stability
+}
+
+// ===== Function Implementations =====
+
+// Interrupt Service Routine for RPM pulse counting
+void rpmPulseISR() {
+  pulseCount++;
+  lastPulseTime = micros();
+}
+
+void readSensors() {
+  // Calculate RPM from pulse count over time interval
+  unsigned long currentTime = millis();
+  
+  if (currentTime - lastRPMCalculation >= rpmCalculationInterval) {
+    // Calculate RPM: (pulses * 60 seconds) / (time_interval_in_seconds * pulses_per_revolution)
+    unsigned long timeDelta = currentTime - lastRPMCalculation;
+    
+    noInterrupts(); // Disable interrupts while reading volatile variables
+    unsigned long currentPulseCount = pulseCount;
+    pulseCount = 0; // Reset pulse count for next interval
+    interrupts(); // Re-enable interrupts
+    
+    // Calculate RPM
+    if (timeDelta > 0) {
+      currentRPM = (currentPulseCount * 60000.0) / (timeDelta * pulsesPerRevolution);
+    }
+    
+    lastRPMCalculation = currentTime;
+  }
+  
+  // Read potentiometer
+  potValue = analogRead(potentiometerPin);
+  
+  // Read manual control potentiometer
+  manualPotValue = analogRead(manualPotPin);
+  
+  // Read digital switches (active LOW with pullup)
+  armSwitch = !digitalRead(armSwitchPin);
+
+}
+
+void processInput() {
+  // Check for serial input
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    
+    if (inChar == '\n') {
+      stringComplete = true;
+    } else {
+      inputString += inChar;
+    }
+  }
+  
+  // Check for Bluetooth input
+  while (SerialBT.available()) {
+    char inChar = (char)SerialBT.read();
+    
+    if (inChar == '\n') {
+      btStringComplete = true;
+    } else {
+      btInputString += inChar;
+    }
+  }
+  
+  // Process complete serial command
+  if (stringComplete) {
+    processCommand(inputString);
+    inputString = "";
+    stringComplete = false;
+  }
+  
+  // Process complete Bluetooth command
+  if (btStringComplete) {
+    processCommand(btInputString);
+    btInputString = "";
+    btStringComplete = false;
+  }
+}
+
+void processCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  if (command.startsWith("setrpm ")) {
+    double newSetpoint = command.substring(7).toDouble();
+    if (newSetpoint > 0 && newSetpoint <= 10000) {
+      setpointRPM = newSetpoint;
+      dualPrintln("Target RPM set to: " + String(setpointRPM));
+    } else {
+      dualPrintln("Invalid RPM value. Range: 1-10000");
+    }
+  }
+  else if (command.startsWith("setpid ")) {
+    // Parse PID values: setpid kp ki kd
+    int firstSpace = command.indexOf(' ', 7);
+    int secondSpace = command.indexOf(' ', firstSpace + 1);
+    
+    if (firstSpace > 0 && secondSpace > 0) {
+      double newKp = command.substring(7, firstSpace).toDouble();
+      double newKi = command.substring(firstSpace + 1, secondSpace).toDouble();
+      double newKd = command.substring(secondSpace + 1).toDouble();
+      
+      if (newKp >= 0 && newKi >= 0 && newKd >= 0) {
+        Kp = newKp;
+        Ki = newKi;
+        Kd = newKd;
+        myPID.SetTunings(Kp, Ki, Kd);
+        dualPrintln("PID constants updated:");
+        dualPrintln("  Kp: " + String(Kp));
+        dualPrintln("  Ki: " + String(Ki));
+        dualPrintln("  Kd: " + String(Kd));
+      } else {
+        dualPrintln("Invalid PID values. Must be non-negative.");
+      }
+    } else {
+      dualPrintln("Usage: setpid <kp> <ki> <kd>");
+    }
+  }
+  else if (command.startsWith("calibrate ")) {
+    processCalibrationCommand(command.substring(10));
+  }
+  else if (command.startsWith("safety ")) {
+    processSafetyCommand(command.substring(7));
+  }
+  else if (command == "arm") {
+    attemptArm();
+  }
+  else if (command == "disarm") {
+    systemArmed = false;
+    dualPrintln("System DISARMED - Manual Control Mode");
+  }
+  else if (command == "status") {
+    printDetailedStatus();
+  }
+  else if (command == "help") {
+    printHelp();
+  }
+  else {
+    dualPrintln("Unknown command: " + command);
+    dualPrintln("Type 'help' for available commands.");
+  }
+}
+
+void updateSystemState() {
+  // Track arm switch state changes for toggle detection
+  bool armSwitchCurrentState = armSwitch;
+  
+  // Safety override logic (only active when enabled)
+  if (overrideEnabled && systemArmed) {
+    // Check if potentiometer exceeds threshold while armed
+    if (manualPotValue > overrideThreshold && !safetyOverrideActive) {
+      // Trigger safety override
+      safetyOverrideActive = true;
+      dualPrintln("SAFETY OVERRIDE TRIGGERED - Potentiometer exceeded threshold!");
+    }
+    // If safety override was triggered and potentiometer is now below threshold, auto-disarm
+    else if (safetyOverrideActive && manualPotValue <= overrideThreshold) {
+      // Automatically disarm and switch to manual mode
+      systemArmed = false;
+      dualPrintln("SAFETY OVERRIDE ACTIVE - System disarmed, returning to manual mode");
+      dualPrintln("To rearm, toggle arm switch OFF then ON");
+    }
+  }
+  
+  // Handle arm switch state changes
+  if (armSwitchCurrentState && !armSwitchPreviousState) {
+    // Arm switch just turned ON (rising edge)
+    attemptArm();
+  } else if (!armSwitchCurrentState && armSwitchPreviousState) {
+    // Arm switch just turned OFF (falling edge)
+    if (systemArmed) {
+      systemArmed = false;
+      dualPrintln("System DISARMED via switch - Manual Control Mode");
+    }
+  }
+  
+  // Update previous arm switch state
+  armSwitchPreviousState = armSwitchCurrentState;
+}
+
+// Helper function to attempt arming the system with safety checks
+bool attemptArm() {
+  // Check if safety override is active - if so, verify pot is below threshold before allowing rearm
+  if (safetyOverrideActive) {
+    if (manualPotValue <= overrideThreshold) {
+      moveServoToPreposition();
+      systemArmed = true;
+      safetyOverrideActive = false; // Clear override flag
+      dualPrintln("System ARMED - Automatic PID Control Mode");
+      return true;
+    } else {
+      dualPrintln("Cannot arm: Potentiometer above threshold (" + String(manualPotValue) + " > " + String(overrideThreshold) + ")");
+      return false;
+    }
+  } else {
+    // Normal arming (no override condition)
+    moveServoToPreposition();
+    systemArmed = true;
+    dualPrintln("System ARMED - Automatic PID Control Mode");
+    return true;
+  }
+}
+
+// Helper function to move servo to preposition when arming
+void moveServoToPreposition() {
+  servoPosition = applyCalibration(preposition);
+  clutchServo.write(servoPosition);
+  dualPrintln("Servo moved to preposition: " + String(preposition) + "°");
+}
+
+void runPIDControl() {
+  // Compute PID output
+  if (myPID.Compute()) {
+    // Map PID output to servo position with calibration
+    servoPosition = (int)pidOutput;
+    servoPosition = applyCalibration(servoPosition);
+    clutchServo.write(servoPosition);
+  }
+}
+
+void runManualControl() {
+  // Map potentiometer value (0-4095 for ESP32 12-bit ADC) to servo position with calibration
+  int rawPosition = map(manualPotValue, 0, 4095, min_position, max_position);
+  servoPosition = applyCalibration(rawPosition);
+  clutchServo.write(servoPosition);
+}
+
+void updateOutputs() {
+  // Update arm light - solid on when armed (automatic), flashing when disarmed (manual)
+  if (systemArmed) {
+    // Solid on when armed (automatic mode)
+    digitalWrite(armLightPin, HIGH);
+  } else {
+    // Determine flash interval based on safety override state
+    unsigned long flashInterval = safetyOverrideActive ? ledFlashIntervalOverride : ledFlashInterval;
+    
+    // Flashing when disarmed (manual mode) or safety override
+    unsigned long currentTime = millis();
+    if (currentTime - lastLEDFlash >= flashInterval) {
+      ledState = !ledState;
+      digitalWrite(armLightPin, ledState);
+      lastLEDFlash = currentTime;
+    }
+  }
+}
+
+void printStatus() {
+  dualPrint("RPM: ");
+  dualPrint(String(currentRPM));
+  dualPrint(" | Target: ");
+  dualPrint(String(setpointRPM));
+  dualPrint(" | Servo: ");
+  dualPrint(String(servoPosition));
+  dualPrint("° | Mode: ");
+  dualPrint(systemArmed ? "AUTO" : "MANUAL");
+  dualPrint(" | PID Out: ");
+  dualPrintln(String(pidOutput));
+}
+
+void printDetailedStatus() {
+  dualPrintln("=== EMC Type 1 Controller Status ===");
+  dualPrintln("Sensor Readings:");
+  
+  // Show pulse count and frequency information
+  noInterrupts();
+  unsigned long currentPulseCount = pulseCount;
+  interrupts();
+  
+  dualPrintln("  RPM Sensor: Digital pulse train on pin 19");
+  dualPrintln("  Current RPM: " + String(currentRPM));
+  dualPrintln("  Pulse Count (current interval): " + String(currentPulseCount));
+  dualPrintln("  Potentiometer: " + String(potValue));
+  dualPrintln("  Manual Control Pot: " + String(manualPotValue));
+  dualPrintln("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
+
+  dualPrintln();
+  
+  dualPrintln("Control Parameters:");
+  dualPrintln("  Target RPM: " + String(setpointRPM));
+  dualPrintln("  PID Kp: " + String(Kp));
+  dualPrintln("  PID Ki: " + String(Ki));
+  dualPrintln("  PID Kd: " + String(Kd));
+  dualPrintln();
+  
+  dualPrintln("Calibration Settings:");
+  dualPrintln("  Min Position: " + String(min_position) + "°");
+  dualPrintln("  Max Position: " + String(max_position) + "°");
+  dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("  Preposition: " + String(preposition) + "°");
+  dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  dualPrintln();
+  
+  dualPrintln("Safety Override Settings:");
+  dualPrintln("  Enabled: " + String(overrideEnabled ? "YES" : "NO"));
+  dualPrintln("  Threshold: " + String(overrideThreshold) + " (range: 0-4095)");
+  dualPrintln("  Override Active: " + String(safetyOverrideActive ? "YES" : "NO"));
+  dualPrintln();
+  
+  dualPrintln("System State:");
+  dualPrintln("  Mode: " + String(systemArmed ? "AUTOMATIC" : "MANUAL"));
+  dualPrintln("  Armed: " + String(systemArmed ? "YES" : "NO"));
+  dualPrintln("  Servo Position: " + String(servoPosition) + "°");
+  dualPrintln("  PID Output: " + String(pidOutput));
+  dualPrintln("  Arm Light: " + String(digitalRead(armLightPin) ? "ON" : "OFF"));
+  dualPrintln("====================================");
+}
+
+void printHelp() {
+  dualPrintln("=== EMC Type 1 Controller Commands ===");
+  dualPrintln("setrpm <value>     - Set target RPM (1-10000)");
+  dualPrintln("setpid <kp> <ki> <kd> - Set PID constants");
+  dualPrintln("arm                - Arm system (automatic PID mode)");
+  dualPrintln("disarm             - Disarm system (manual control mode)");
+  dualPrintln("calibrate set_min <value>     - Set minimum servo position (0-180)");
+  dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
+  dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  dualPrintln("calibrate set_preposition <value> - Set preposition servo position (0-180)");
+  dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  dualPrintln("safety enable      - Enable safety override system");
+  dualPrintln("safety disable     - Disable safety override system");
+  dualPrintln("safety set_threshold <value> - Set override threshold (0-4095)");
+  dualPrintln("status             - Show detailed status");
+  dualPrintln("help               - Show this help");
+  dualPrintln("");
+  dualPrintln("MODES:");
+  dualPrintln("  AUTOMATIC: System armed, PID controls servo");
+  dualPrintln("  MANUAL: System disarmed, pin 35 potentiometer controls servo");
+  dualPrintln("");
+  dualPrintln("SAFETY OVERRIDE:");
+  dualPrintln("  When enabled, system auto-disarms if potentiometer exceeds");
+  dualPrintln("  threshold and then drops below it. Arm light flashes faster.");
+  dualPrintln("  Toggle arm switch OFF/ON to rearm (pot must be below threshold).");
+  dualPrintln("");
+  dualPrintln("CALIBRATION:");
+  dualPrintln("  All servo positions are constrained to min/max range");
+  dualPrintln("  Neutral position is used as default startup position");
+  dualPrintln("  Preposition is where servo moves when system is armed");
+  dualPrintln("  Direction setting reverses servo travel if needed");
+  dualPrintln("  Calibration data is saved to Preferences automatically");
+  dualPrintln("=======================================");
+}
+
+// ===== Calibration Functions =====
+
+void loadCalibrationData() {
+  preferences.begin("emc_calibration", false);
+  
+  // Load calibration data with defaults
+  min_position = preferences.getInt("min_pos", 0);
+  max_position = preferences.getInt("max_pos", 180);
+  neutral_position = preferences.getInt("neutral_pos", 90);
+  preposition = preferences.getInt("preposition", 90);
+  direction_reversed = preferences.getBool("direction", false);
+  
+  // Load safety override settings with defaults
+  overrideThreshold = preferences.getInt("override_thresh", 3500);
+  overrideEnabled = preferences.getBool("override_en", false);
+  
+  // Validate loaded data
+  min_position = constrain(min_position, 0, 180);
+  max_position = constrain(max_position, 0, 180);
+  neutral_position = constrain(neutral_position, min_position, max_position);
+  preposition = constrain(preposition, min_position, max_position);
+  overrideThreshold = constrain(overrideThreshold, 0, 4095);
+  
+  preferences.end();
+  
+  dualPrintln("Calibration data loaded from Preferences");
+}
+
+void saveCalibrationData() {
+  preferences.begin("emc_calibration", false);
+  
+  preferences.putInt("min_pos", min_position);
+  preferences.putInt("max_pos", max_position);
+  preferences.putInt("neutral_pos", neutral_position);
+  preferences.putInt("preposition", preposition);
+  preferences.putBool("direction", direction_reversed);
+  
+  // Save safety override settings
+  preferences.putInt("override_thresh", overrideThreshold);
+  preferences.putBool("override_en", overrideEnabled);
+  
+  preferences.end();
+  
+  dualPrintln("Calibration data saved to Preferences");
+}
+
+void processCalibrationCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  if (command.startsWith("set_min ")) {
+    int value = command.substring(8).toInt();
+    if (value >= 0 && value <= 180 && value < max_position) {
+      min_position = value;
+      if (neutral_position < min_position) {
+        neutral_position = min_position;
+      }
+      
+      // Update PID output limits
+      myPID.SetOutputLimits(min_position, max_position);
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(min_position);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      dualPrintln("Minimum position set to: " + String(min_position) + "° (servo moved for confirmation)");
+      if (neutral_position != command.substring(8).toInt()) {
+        dualPrintln("Neutral position adjusted to: " + String(neutral_position) + "°");
+      }
+    } else {
+      dualPrintln("Invalid minimum position. Must be 0-180 and less than max position (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_max ")) {
+    int value = command.substring(8).toInt();
+    if (value >= 0 && value <= 180 && value > min_position) {
+      max_position = value;
+      if (neutral_position > max_position) {
+        neutral_position = max_position;
+      }
+      
+      // Update PID output limits
+      myPID.SetOutputLimits(min_position, max_position);
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(max_position);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      dualPrintln("Maximum position set to: " + String(max_position) + "° (servo moved for confirmation)");
+      if (neutral_position != command.substring(8).toInt()) {
+        dualPrintln("Neutral position adjusted to: " + String(neutral_position) + "°");
+      }
+    } else {
+      dualPrintln("Invalid maximum position. Must be 0-180 and greater than min position (" + String(min_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_neutral ")) {
+    int value = command.substring(12).toInt();
+    if (value >= min_position && value <= max_position) {
+      neutral_position = value;
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(neutral_position);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      dualPrintln("Neutral position set to: " + String(neutral_position) + "° (servo moved for confirmation)");
+    } else {
+      dualPrintln("Invalid neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_preposition ")) {
+    int value = command.substring(16).toInt();
+    if (value >= min_position && value <= max_position) {
+      preposition = value;
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(preposition);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      dualPrintln("Preposition set to: " + String(preposition) + "° (servo moved for confirmation)");
+    } else {
+      dualPrintln("Invalid preposition. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("direction ")) {
+    int value = command.substring(10).toInt();
+    if (value == 0 || value == 1) {
+      direction_reversed = (value == 1);
+      
+      // Move servo to current position with new direction for visual confirmation
+      servoPosition = applyCalibration(servoPosition);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      dualPrintln("Servo direction set to: " + String(direction_reversed ? "REVERSED" : "NORMAL") + " (servo moved for confirmation)");
+    } else {
+      dualPrintln("Invalid direction value. Use 0 for normal or 1 for reversed");
+    }
+  }
+  else {
+    dualPrintln("Unknown calibration command. Available: set_min, set_max, set_neutral, set_preposition, direction");
+  }
+}
+
+int applyCalibration(int position) {
+  // Constrain position to calibrated range
+  position = constrain(position, min_position, max_position);
+  
+  // Apply direction reversal if configured
+  if (direction_reversed) {
+    position = max_position - (position - min_position);
+  }
+  
+  return position;
+}
+
+void processSafetyCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  if (command == "enable") {
+    overrideEnabled = true;
+    saveCalibrationData();
+    dualPrintln("Safety override ENABLED");
+    dualPrintln("Threshold: " + String(overrideThreshold) + " (potentiometer range: 0-4095)");
+  }
+  else if (command == "disable") {
+    overrideEnabled = false;
+    safetyOverrideActive = false; // Clear any active override
+    saveCalibrationData();
+    dualPrintln("Safety override DISABLED");
+  }
+  else if (command.startsWith("set_threshold ")) {
+    int value = command.substring(14).toInt();
+    if (value >= 0 && value <= 4095) {
+      overrideThreshold = value;
+      saveCalibrationData();
+      dualPrintln("Safety override threshold set to: " + String(overrideThreshold));
+    } else {
+      dualPrintln("Invalid threshold value. Must be 0-4095 (12-bit ADC range)");
+    }
+  }
+  else {
+    dualPrintln("Unknown safety command. Available: enable, disable, set_threshold <value>");
+  }
+}
+
+void printCalibrationStatus() {
+  dualPrintln("=== Calibration Status ===");
+  dualPrintln("Minimum Position: " + String(min_position) + "°");
+  dualPrintln("Maximum Position: " + String(max_position) + "°");
+  dualPrintln("Neutral Position: " + String(neutral_position) + "°");
+  dualPrintln("Preposition: " + String(preposition) + "°");
+  dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  dualPrintln("===========================");
+}

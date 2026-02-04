@@ -1,0 +1,551 @@
+#include <Arduino.h>
+#include <PID_v1.h>
+#include <Servo.h>
+#include <EEPROM.h>
+
+// ===== EMC Type 1 Controller for Arduino Uno =====
+// Hydraulic clutch controller with user-defined parameters,
+// automatic sensor inputs, PID control, and LED feedback
+
+// ===== Pin Definitions =====
+const int rpmSensorPin = 3;         // Digital pin for RPM sensor pulse train (interrupt pin)
+const int potentiometerPin = A1;    // Additional potentiometer input
+const int manualPotPin = A2;        // Manual servo control potentiometer
+const int servoPin = 9;             // PWM pin for servo motor control
+const int armLightPin = 13;         // LED pin for arming light (built-in LED)
+const int armSwitchPin = 2;         // Digital pin for arm switch
+
+
+// ===== Global Variables =====
+// Calibration parameters
+int min_position = 0;               // Minimum servo position (0-180)
+int max_position = 180;             // Maximum servo position (0-180)
+int neutral_position = 90;          // Neutral servo position (0-180)
+bool direction_reversed = false;    // Servo travel direction (false = normal, true = reversed)
+
+// EEPROM addresses for calibration data
+const int EEPROM_MIN_POS_ADDR = 0;
+const int EEPROM_MAX_POS_ADDR = 2;
+const int EEPROM_NEUTRAL_POS_ADDR = 4;
+const int EEPROM_DIRECTION_ADDR = 6;
+const int EEPROM_MAGIC_ADDR = 8;    // Magic number to check if EEPROM data is valid
+const int EEPROM_MAGIC_VALUE = 0xABCD;
+
+// RPM pulse counting variables (volatile for ISR)
+volatile unsigned long pulseCount = 0;
+volatile unsigned long lastPulseTime = 0;
+unsigned long lastRPMCalculation = 0;
+const unsigned long rpmCalculationInterval = 1000; // Calculate RPM every 1000ms
+const int pulsesPerRevolution = 1; // Assuming 1 pulse per revolution for ECU signal
+
+// Sensor readings
+int potValue = 0;
+int manualPotValue = 0;
+bool armSwitch = false;
+
+bool systemArmed = false;
+
+// LED flashing variables for manual mode
+unsigned long lastLEDFlash = 0;
+const unsigned long ledFlashInterval = 500; // Flash every 500ms
+bool ledState = false;
+
+// PID Control Variables
+double setpointRPM = 1000.0;        // Target RPM (user-configurable)
+double currentRPM = 0.0;            // Current RPM from sensor
+double pidOutput = 0.0;             // PID output (0-255 for PWM)
+double Kp = 2.0, Ki = 5.0, Kd = 1.0; // PID constants (user-configurable)
+
+// Servo control
+Servo clutchServo;
+int servoPosition = 90;             // Servo position (0-180 degrees)
+
+// PID Controller
+PID myPID(&currentRPM, &pidOutput, &setpointRPM, Kp, Ki, Kd, DIRECT);
+
+// Serial communication variables
+String inputString = "";
+bool stringComplete = false;
+
+// Timing variables
+unsigned long lastPrintTime = 0;
+const unsigned long printInterval = 500; // Print status every 500ms
+
+// ===== Setup Function =====
+void setup() {
+  Serial.begin(9600);
+  
+  // Load calibration data from EEPROM
+  loadCalibrationData();
+  
+  // Initialize pin modes
+  pinMode(rpmSensorPin, INPUT_PULLUP); // Digital input with pullup for RPM pulse train
+  pinMode(potentiometerPin, INPUT);
+  pinMode(manualPotPin, INPUT);
+  pinMode(armLightPin, OUTPUT);
+  pinMode(armSwitchPin, INPUT_PULLUP);
+
+  // Setup interrupt for RPM pulse counting (falling edge detection)
+  attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulseISR, FALLING);
+  
+  // Initialize timing variables
+  lastRPMCalculation = millis();
+  
+  // Initialize servo
+  clutchServo.attach(servoPin);
+  servoPosition = neutral_position;  // Use calibrated neutral position
+  clutchServo.write(servoPosition);
+  
+  // Initialize PID controller
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(min_position, max_position); // Use calibrated range
+  
+  // Initialize outputs
+  digitalWrite(armLightPin, LOW);
+  
+  // Reserve string space for serial input
+  inputString.reserve(200);
+  
+  // Print startup message
+  Serial.println("=== EMC Type 1 Controller Initialized ===");
+  Serial.println("RPM Input: Digital pulse train on pin 3 (interrupt)");
+  Serial.println("Manual Control: Potentiometer on pin A2");
+  Serial.println("Commands:");
+  Serial.println("  setrpm <value>     - Set target RPM");
+  Serial.println("  setpid <kp> <ki> <kd> - Set PID constants");
+  Serial.println("  arm                - Arm the system (automatic mode)");
+  Serial.println("  disarm             - Disarm the system (manual mode)");
+  Serial.println("  calibrate set_min <value>     - Set minimum servo position (0-180)");
+  Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
+  Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  Serial.println("  status             - Show current status");
+  Serial.println("  help               - Show this help");
+  Serial.println("========================================");
+  printCalibrationStatus();
+  printStatus();
+}
+
+// ===== Main Loop =====
+void loop() {
+  // Read sensor inputs
+  readSensors();
+  
+  // Process serial commands
+  processSerialInput();
+  
+  // Update system state
+  updateSystemState();
+  
+  // Run PID control if armed (automatic mode)
+  if (systemArmed) {
+    runPIDControl();
+  } else {
+    // Manual servo control when disarmed
+    runManualControl();
+  }
+  
+  // Update outputs
+  updateOutputs();
+  
+  // Print status periodically
+  if (millis() - lastPrintTime >= printInterval) {
+    printStatus();
+    lastPrintTime = millis();
+  }
+  
+  delay(50); // Small delay for stability
+}
+
+// ===== Function Implementations =====
+
+// Interrupt Service Routine for RPM pulse counting
+void rpmPulseISR() {
+  pulseCount++;
+  lastPulseTime = micros();
+}
+
+void readSensors() {
+  // Calculate RPM from pulse count over time interval
+  unsigned long currentTime = millis();
+  
+  if (currentTime - lastRPMCalculation >= rpmCalculationInterval) {
+    // Calculate RPM: (pulses * 60 seconds) / (time_interval_in_seconds * pulses_per_revolution)
+    unsigned long timeDelta = currentTime - lastRPMCalculation;
+    
+    noInterrupts(); // Disable interrupts while reading volatile variables
+    unsigned long currentPulseCount = pulseCount;
+    pulseCount = 0; // Reset pulse count for next interval
+    interrupts(); // Re-enable interrupts
+    
+    // Calculate RPM
+    if (timeDelta > 0) {
+      currentRPM = (currentPulseCount * 60000.0) / (timeDelta * pulsesPerRevolution);
+    }
+    
+    lastRPMCalculation = currentTime;
+  }
+  
+  // Read potentiometer
+  potValue = analogRead(potentiometerPin);
+  
+  // Read manual control potentiometer
+  manualPotValue = analogRead(manualPotPin);
+  
+  // Read digital switches (active LOW with pullup)
+  armSwitch = !digitalRead(armSwitchPin);
+
+}
+
+void processSerialInput() {
+  // Check for serial input
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    
+    if (inChar == '\n') {
+      stringComplete = true;
+    } else {
+      inputString += inChar;
+    }
+  }
+  
+  // Process complete command
+  if (stringComplete) {
+    processCommand(inputString);
+    inputString = "";
+    stringComplete = false;
+  }
+}
+
+void processCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  if (command.startsWith("setrpm ")) {
+    double newSetpoint = command.substring(7).toDouble();
+    if (newSetpoint > 0 && newSetpoint <= 10000) {
+      setpointRPM = newSetpoint;
+      Serial.println("Target RPM set to: " + String(setpointRPM));
+    } else {
+      Serial.println("Invalid RPM value. Range: 1-10000");
+    }
+  }
+  else if (command.startsWith("setpid ")) {
+    // Parse PID values: setpid kp ki kd
+    int firstSpace = command.indexOf(' ', 7);
+    int secondSpace = command.indexOf(' ', firstSpace + 1);
+    
+    if (firstSpace > 0 && secondSpace > 0) {
+      double newKp = command.substring(7, firstSpace).toDouble();
+      double newKi = command.substring(firstSpace + 1, secondSpace).toDouble();
+      double newKd = command.substring(secondSpace + 1).toDouble();
+      
+      if (newKp >= 0 && newKi >= 0 && newKd >= 0) {
+        Kp = newKp;
+        Ki = newKi;
+        Kd = newKd;
+        myPID.SetTunings(Kp, Ki, Kd);
+        Serial.println("PID constants updated:");
+        Serial.println("  Kp: " + String(Kp));
+        Serial.println("  Ki: " + String(Ki));
+        Serial.println("  Kd: " + String(Kd));
+      } else {
+        Serial.println("Invalid PID values. Must be non-negative.");
+      }
+    } else {
+      Serial.println("Usage: setpid <kp> <ki> <kd>");
+    }
+  }
+  else if (command.startsWith("calibrate ")) {
+    processCalibrationCommand(command.substring(10));
+  }
+  else if (command == "arm") {
+    systemArmed = true;
+    Serial.println("System ARMED - Automatic PID Control Mode");
+  }
+  else if (command == "disarm") {
+    systemArmed = false;
+    Serial.println("System DISARMED - Manual Control Mode");
+  }
+  else if (command == "status") {
+    printDetailedStatus();
+  }
+  else if (command == "help") {
+    printHelp();
+  }
+  else {
+    Serial.println("Unknown command: " + command);
+    Serial.println("Type 'help' for available commands.");
+  }
+}
+
+void updateSystemState() {
+  // System is armed if either arm switch is pressed OR armed via serial
+  bool shouldBeArmed = systemArmed || armSwitch;
+  
+  if (shouldBeArmed && !systemArmed) {
+    systemArmed = true;
+    Serial.println("System ARMED via switch - Automatic PID Control Mode");
+  } else if (!shouldBeArmed && systemArmed && !armSwitch) {
+    // Only disarm if switch is released and not armed via serial
+    systemArmed = false;
+    Serial.println("System DISARMED via switch - Manual Control Mode");
+  }
+}
+
+void runPIDControl() {
+  // Compute PID output
+  if (myPID.Compute()) {
+    // Map PID output to servo position with calibration
+    servoPosition = (int)pidOutput;
+    servoPosition = applyCalibration(servoPosition);
+    clutchServo.write(servoPosition);
+  }
+}
+
+void runManualControl() {
+  // Map potentiometer value (0-1023) to servo position with calibration
+  int rawPosition = map(manualPotValue, 0, 1023, min_position, max_position);
+  servoPosition = applyCalibration(rawPosition);
+  clutchServo.write(servoPosition);
+}
+
+void updateOutputs() {
+  // Update arm light - solid on when armed (automatic), flashing when disarmed (manual)
+  if (systemArmed) {
+    // Solid on when armed (automatic mode)
+    digitalWrite(armLightPin, HIGH);
+  } else {
+    // Flashing when disarmed (manual mode)
+    unsigned long currentTime = millis();
+    if (currentTime - lastLEDFlash >= ledFlashInterval) {
+      ledState = !ledState;
+      digitalWrite(armLightPin, ledState);
+      lastLEDFlash = currentTime;
+    }
+  }
+}
+
+void printStatus() {
+  Serial.print("RPM: ");
+  Serial.print(currentRPM);
+  Serial.print(" | Target: ");
+  Serial.print(setpointRPM);
+  Serial.print(" | Servo: ");
+  Serial.print(servoPosition);
+  Serial.print("° | Mode: ");
+  Serial.print(systemArmed ? "AUTO" : "MANUAL");
+  Serial.print(" | PID Out: ");
+  Serial.println(pidOutput);
+}
+
+void printDetailedStatus() {
+  Serial.println("=== EMC Type 1 Controller Status ===");
+  Serial.println("Sensor Readings:");
+  
+  // Show pulse count and frequency information
+  noInterrupts();
+  unsigned long currentPulseCount = pulseCount;
+  interrupts();
+  
+  Serial.println("  RPM Sensor: Digital pulse train on pin 3");
+  Serial.println("  Current RPM: " + String(currentRPM));
+  Serial.println("  Pulse Count (current interval): " + String(currentPulseCount));
+  Serial.println("  Potentiometer: " + String(potValue));
+  Serial.println("  Manual Control Pot: " + String(manualPotValue));
+  Serial.println("  Arm Switch: " + String(armSwitch ? "PRESSED" : "RELEASED"));
+
+  Serial.println();
+  
+  Serial.println("Control Parameters:");
+  Serial.println("  Target RPM: " + String(setpointRPM));
+  Serial.println("  PID Kp: " + String(Kp));
+  Serial.println("  PID Ki: " + String(Ki));
+  Serial.println("  PID Kd: " + String(Kd));
+  Serial.println();
+  
+  Serial.println("Calibration Settings:");
+  Serial.println("  Min Position: " + String(min_position) + "°");
+  Serial.println("  Max Position: " + String(max_position) + "°");
+  Serial.println("  Neutral Position: " + String(neutral_position) + "°");
+  Serial.println("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  Serial.println();
+  
+  Serial.println("System State:");
+  Serial.println("  Mode: " + String(systemArmed ? "AUTOMATIC" : "MANUAL"));
+  Serial.println("  Armed: " + String(systemArmed ? "YES" : "NO"));
+  Serial.println("  Servo Position: " + String(servoPosition) + "°");
+  Serial.println("  PID Output: " + String(pidOutput));
+  Serial.println("  Arm Light: " + String(digitalRead(armLightPin) ? "ON" : "OFF"));
+  Serial.println("====================================");
+}
+
+void printHelp() {
+  Serial.println("=== EMC Type 1 Controller Commands ===");
+  Serial.println("setrpm <value>     - Set target RPM (1-10000)");
+  Serial.println("setpid <kp> <ki> <kd> - Set PID constants");
+  Serial.println("arm                - Arm system (automatic PID mode)");
+  Serial.println("disarm             - Disarm system (manual control mode)");
+  Serial.println("calibrate set_min <value>     - Set minimum servo position (0-180)");
+  Serial.println("calibrate set_max <value>     - Set maximum servo position (0-180)");
+  Serial.println("calibrate set_neutral <value> - Set neutral servo position (0-180)");
+  Serial.println("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  Serial.println("status             - Show detailed status");
+  Serial.println("help               - Show this help");
+  Serial.println("");
+  Serial.println("MODES:");
+  Serial.println("  AUTOMATIC: System armed, PID controls servo");
+  Serial.println("  MANUAL: System disarmed, A2 potentiometer controls servo");
+  Serial.println("");
+  Serial.println("CALIBRATION:");
+  Serial.println("  All servo positions are constrained to min/max range");
+  Serial.println("  Neutral position is used as default startup position");
+  Serial.println("  Direction setting reverses servo travel if needed");
+  Serial.println("  Calibration data is saved to EEPROM automatically");
+  Serial.println("=======================================");
+}
+
+// ===== Calibration Functions =====
+
+void loadCalibrationData() {
+  // Check if EEPROM contains valid calibration data
+  int magic = 0;
+  EEPROM.get(EEPROM_MAGIC_ADDR, magic);
+  
+  if (magic == EEPROM_MAGIC_VALUE) {
+    // Load calibration data from EEPROM
+    EEPROM.get(EEPROM_MIN_POS_ADDR, min_position);
+    EEPROM.get(EEPROM_MAX_POS_ADDR, max_position);
+    EEPROM.get(EEPROM_NEUTRAL_POS_ADDR, neutral_position);
+    EEPROM.get(EEPROM_DIRECTION_ADDR, direction_reversed);
+    
+    // Validate loaded data
+    min_position = constrain(min_position, 0, 180);
+    max_position = constrain(max_position, 0, 180);
+    neutral_position = constrain(neutral_position, min_position, max_position);
+    
+    Serial.println("Calibration data loaded from EEPROM");
+  } else {
+    // Use default values and save them
+    Serial.println("No valid calibration data found, using defaults");
+    saveCalibrationData();
+  }
+}
+
+void saveCalibrationData() {
+  EEPROM.put(EEPROM_MIN_POS_ADDR, min_position);
+  EEPROM.put(EEPROM_MAX_POS_ADDR, max_position);
+  EEPROM.put(EEPROM_NEUTRAL_POS_ADDR, neutral_position);
+  EEPROM.put(EEPROM_DIRECTION_ADDR, direction_reversed);
+  EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
+  
+  Serial.println("Calibration data saved to EEPROM");
+}
+
+void processCalibrationCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  if (command.startsWith("set_min ")) {
+    int value = command.substring(8).toInt();
+    if (value >= 0 && value <= 180 && value < max_position) {
+      min_position = value;
+      if (neutral_position < min_position) {
+        neutral_position = min_position;
+      }
+      
+      // Update PID output limits
+      myPID.SetOutputLimits(min_position, max_position);
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(min_position);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      Serial.println("Minimum position set to: " + String(min_position) + "° (servo moved for confirmation)");
+      if (neutral_position != command.substring(8).toInt()) {
+        Serial.println("Neutral position adjusted to: " + String(neutral_position) + "°");
+      }
+    } else {
+      Serial.println("Invalid minimum position. Must be 0-180 and less than max position (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_max ")) {
+    int value = command.substring(8).toInt();
+    if (value >= 0 && value <= 180 && value > min_position) {
+      max_position = value;
+      if (neutral_position > max_position) {
+        neutral_position = max_position;
+      }
+      
+      // Update PID output limits
+      myPID.SetOutputLimits(min_position, max_position);
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(max_position);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      Serial.println("Maximum position set to: " + String(max_position) + "° (servo moved for confirmation)");
+      if (neutral_position != command.substring(8).toInt()) {
+        Serial.println("Neutral position adjusted to: " + String(neutral_position) + "°");
+      }
+    } else {
+      Serial.println("Invalid maximum position. Must be 0-180 and greater than min position (" + String(min_position) + ")");
+    }
+  }
+  else if (command.startsWith("set_neutral ")) {
+    int value = command.substring(12).toInt();
+    if (value >= min_position && value <= max_position) {
+      neutral_position = value;
+      
+      // Move servo to new position for visual confirmation
+      servoPosition = applyCalibration(neutral_position);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      Serial.println("Neutral position set to: " + String(neutral_position) + "° (servo moved for confirmation)");
+    } else {
+      Serial.println("Invalid neutral position. Must be between min (" + String(min_position) + ") and max (" + String(max_position) + ")");
+    }
+  }
+  else if (command.startsWith("direction ")) {
+    int value = command.substring(10).toInt();
+    if (value == 0 || value == 1) {
+      direction_reversed = (value == 1);
+      
+      // Move servo to current position with new direction for visual confirmation
+      servoPosition = applyCalibration(servoPosition);
+      clutchServo.write(servoPosition);
+      
+      saveCalibrationData();
+      Serial.println("Servo direction set to: " + String(direction_reversed ? "REVERSED" : "NORMAL") + " (servo moved for confirmation)");
+    } else {
+      Serial.println("Invalid direction value. Use 0 for normal or 1 for reversed");
+    }
+  }
+  else {
+    Serial.println("Unknown calibration command. Available: set_min, set_max, set_neutral, direction");
+  }
+}
+
+int applyCalibration(int position) {
+  // Constrain position to calibrated range
+  position = constrain(position, min_position, max_position);
+  
+  // Apply direction reversal if configured
+  if (direction_reversed) {
+    position = max_position - (position - min_position);
+  }
+  
+  return position;
+}
+
+void printCalibrationStatus() {
+  Serial.println("=== Calibration Status ===");
+  Serial.println("Minimum Position: " + String(min_position) + "°");
+  Serial.println("Maximum Position: " + String(max_position) + "°");
+  Serial.println("Neutral Position: " + String(neutral_position) + "°");
+  Serial.println("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  Serial.println("===========================");
+}
