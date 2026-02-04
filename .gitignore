@@ -1,0 +1,34 @@
+# Arduino build artifacts
+*.hex
+*.elf
+*.eep
+*.lss
+*.map
+*.sym
+*.o
+*.d
+*.bin
+
+# Build folders
+build/
+.build/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Old files without proper extensions (keep the properly organized versions)
+Clutch Control Arm Light PID Basic
+Clutch Control PID Auto Tune
+Clutch Control PID Basic
+EMC Type 1
+EMC Type 1 ESP 32
+PID Auto Tune 20%
+PID Autotune

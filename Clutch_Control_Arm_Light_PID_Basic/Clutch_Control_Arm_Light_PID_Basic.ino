@@ -1,0 +1,107 @@
+#include <Arduino.h>
+#include <PID_v1.h>
+
+// Pin Definitions
+const int rpmPin = A0;
+const int motorPin = 2;
+const int clutchSwitchPin = 4;
+const int armSwitchPin = 7;
+const int valve1Pin = 3;
+const int valve2Pin = 6;
+const int armLightPin = 8;
+
+// Variables
+int rpmValue = 0;
+bool clutchSwitch = false;
+bool armSwitch = false;
+bool systemArmed = false;
+
+// PID variables
+double setPoint = 10.0;
+double input = 0.0;
+double output = 0.0;
+double Kp = 1.0, Ki = 0.1, Kd = 0.05;
+PID myPID(&input, &output, &setPoint, Kp, Ki, Kd, DIRECT);
+
+// Timer variables
+unsigned long zeroPWMStartTime = 0;
+const unsigned long zeroPWMThreshold = 2000; // 2000 ms
+
+void setup() {
+  Serial.begin(9600);
+
+  // Initialize pin modes
+  pinMode(rpmPin, INPUT);
+  pinMode(motorPin, OUTPUT);
+  pinMode(clutchSwitchPin, INPUT);
+  pinMode(armSwitchPin, INPUT);
+  pinMode(valve1Pin, OUTPUT);
+  pinMode(valve2Pin, OUTPUT);
+  pinMode(armLightPin, OUTPUT);
+
+  // Initialize PID controller
+  myPID.SetMode(AUTOMATIC);
+
+  // Initialize outputs to initial conditions
+  digitalWrite(motorPin, LOW);
+  digitalWrite(armLightPin, LOW);
+  analogWrite(valve1Pin, 0);
+  analogWrite(valve2Pin, 0);
+}
+
+void loop() {
+  // Read inputs
+  rpmValue = analogRead(rpmPin);
+  clutchSwitch = digitalRead(clutchSwitchPin);
+  armSwitch = digitalRead(armSwitchPin);
+
+  if (rpmValue > 0 && armSwitch == HIGH) {
+    digitalWrite(valve1Pin, HIGH);
+    for (int pwmValue = 0; pwmValue <= 255; pwmValue += 5) {
+      analogWrite(motorPin, pwmValue);
+      delay(40); // 40 ms delay to reach 1 second total
+    }
+    digitalWrite(armLightPin, HIGH);
+    systemArmed = true;
+
+    // PID control for valve position when arm light is high
+    if (digitalRead(armLightPin) == HIGH) {
+        input = rpmValue; // Update the input value from your sensor
+        myPID.Compute();
+        analogWrite(valve2Pin, output); // Use the output value to control the solenoid with PWM
+
+        // Check if PID output is zero
+        if (output == 0) {
+          if (zeroPWMStartTime == 0) {
+            zeroPWMStartTime = millis(); // Start timer
+          } else if (millis() - zeroPWMStartTime >= zeroPWMThreshold) {
+            digitalWrite(armLightPin, LOW); // Turn off arm light if zero PWM for more than 2000 ms
+          }
+        } else {
+          zeroPWMStartTime = 0; // Reset timer if output is not zero
+        }
+    }
+  } else {
+    digitalWrite(valve1Pin, LOW);
+    digitalWrite(valve2Pin, LOW);
+    analogWrite(motorPin, 0);
+    digitalWrite(armLightPin, LOW);
+    systemArmed = false;
+  }
+
+  // Log RPM value, valve position, and time in CSV format
+  unsigned long currentTime = millis();
+  Serial.print(currentTime);
+  Serial.print(",");
+  Serial.print(rpmValue);
+  Serial.print(",");
+  Serial.print(digitalRead(valve1Pin));
+  Serial.print(",");
+  Serial.print(digitalRead(valve2Pin));
+  Serial.print(",");
+  Serial.print(digitalRead(motorPin));
+  Serial.print(",");
+  Serial.println(digitalRead(armLightPin));
+
+  delay(100);
+}
