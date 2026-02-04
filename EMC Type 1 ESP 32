@@ -50,7 +50,7 @@ volatile unsigned long pulseCount = 0;
 volatile unsigned long lastPulseTime = 0;
 unsigned long lastRPMCalculation = 0;
 const unsigned long rpmCalculationInterval = 1000; // Calculate RPM every 1000ms
-const int pulsesPerRevolution = 1; // Assuming 1 pulse per revolution for ECU signal
+int pulsesPerRevolution = 1; // Pulses per revolution (user-configurable, default: 1)
 
 // Sensor readings
 int potValue = 0;
@@ -96,6 +96,9 @@ void setup() {
   
   // Load calibration data from Preferences
   loadCalibrationData();
+  
+  // Load PPR value from Preferences
+  loadPPRData();
   
   // Initialize Bluetooth Classic
   SerialBT.begin("EMC_Type_1_Controller"); // Bluetooth device name
@@ -147,6 +150,8 @@ void setup() {
   Serial.println("  calibrate set_max <value>     - Set maximum servo position (0-180)");
   Serial.println("  calibrate set_neutral <value> - Set neutral servo position (0-180)");
   Serial.println("  calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  Serial.println("  ppr set <value>    - Set pulses per revolution (positive integer)");
+  Serial.println("  ppr get            - Get current pulses per revolution");
   Serial.println("  status             - Show current status");
   Serial.println("  help               - Show this help");
   Serial.println("========================================");
@@ -321,6 +326,9 @@ void processCommand(String command) {
   else if (command.startsWith("calibrate ")) {
     processCalibrationCommand(command.substring(10));
   }
+  else if (command.startsWith("ppr ")) {
+    processPPRCommand(command.substring(4));
+  }
   else if (command == "arm") {
     systemArmed = true;
     dualPrintln("System ARMED - Automatic PID Control Mode");
@@ -431,6 +439,7 @@ void printDetailedStatus() {
   dualPrintln("  Max Position: " + String(max_position) + "°");
   dualPrintln("  Neutral Position: " + String(neutral_position) + "°");
   dualPrintln("  Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  dualPrintln("  Pulses Per Revolution: " + String(pulsesPerRevolution));
   dualPrintln();
   
   dualPrintln("System State:");
@@ -452,6 +461,8 @@ void printHelp() {
   dualPrintln("calibrate set_max <value>     - Set maximum servo position (0-180)");
   dualPrintln("calibrate set_neutral <value> - Set neutral servo position (0-180)");
   dualPrintln("calibrate direction <0|1>     - Set direction (0=normal, 1=reversed)");
+  dualPrintln("ppr set <value>    - Set pulses per revolution (positive integer)");
+  dualPrintln("ppr get            - Get current pulses per revolution");
   dualPrintln("status             - Show detailed status");
   dualPrintln("help               - Show this help");
   dualPrintln("");
@@ -607,4 +618,57 @@ void printCalibrationStatus() {
   dualPrintln("Neutral Position: " + String(neutral_position) + "°");
   dualPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
   dualPrintln("===========================");
+}
+
+// ===== PPR Functions =====
+
+void loadPPRData() {
+  preferences.begin("emc_ppr", false);
+  
+  // Load PPR value with default of 1
+  pulsesPerRevolution = preferences.getInt("ppr_value", 1);
+  
+  // Validate loaded data - must be positive nonzero integer
+  if (pulsesPerRevolution <= 0) {
+    pulsesPerRevolution = 1;
+    dualPrintln("Warning: Invalid PPR value loaded. Reset to default: 1");
+  }
+  
+  preferences.end();
+  
+  dualPrintln("PPR value loaded: " + String(pulsesPerRevolution));
+}
+
+void savePPRData() {
+  preferences.begin("emc_ppr", false);
+  
+  preferences.putInt("ppr_value", pulsesPerRevolution);
+  
+  preferences.end();
+  
+  dualPrintln("PPR value saved to Preferences");
+}
+
+void processPPRCommand(String command) {
+  command.trim();
+  command.toLowerCase();
+  
+  if (command.startsWith("set ")) {
+    int value = command.substring(4).toInt();
+    
+    // Validate input: must be positive nonzero integer
+    if (value > 0) {
+      pulsesPerRevolution = value;
+      savePPRData();
+      dualPrintln("Pulses per revolution set to: " + String(pulsesPerRevolution));
+    } else {
+      dualPrintln("Error: Invalid PPR value. Must be a positive nonzero integer.");
+    }
+  }
+  else if (command == "get") {
+    dualPrintln("Current pulses per revolution: " + String(pulsesPerRevolution));
+  }
+  else {
+    dualPrintln("Unknown PPR command. Available: set <value>, get");
+  }
 }
