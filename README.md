@@ -54,6 +54,17 @@ All Arduino sketches are organized in properly named folders with `.ino` file ex
 
 - **[EMC_Type_1_README.md](EMC_Type_1_README.md)** - Complete functionality documentation for EMC Type 1 controllers
 - **[System_Workflow_Overview.md](System_Workflow_Overview.md)** - Step-by-step setup and usage guide
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Guide for modifying code with GitHub Copilot and maintaining versions
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and improvements tracking
+
+## 🤝 Contributing & Future Development
+
+Want to modify or improve the code? Check out **[CONTRIBUTING.md](CONTRIBUTING.md)** for:
+- How to use GitHub Copilot with this repository
+- Where to access and save files
+- Git workflow for maintaining continuity
+- Best practices for version management
+- Step-by-step guide for adding new features
 
 ## 💡 Need Help?
 
