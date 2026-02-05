@@ -22,6 +22,9 @@
 // - Fix: take 'now = micros()' BEFORE disabling interrupts to avoid stale lastPulse timeout race
 // - Fix: ISR updates lastPulseMicros ONLY for ACCEPTED pulses (prevents rejected/noise pulses corrupting period)
 // - Update: Persist ALL user-defined setup parameters (setrpm, setpid, aggressiveness, pidStartPosition)
+// - Update: Telemetry modes + rate, persisted, with commands:
+//     telemetry auto|on|off
+//     telemetry rate <ms>
 
 // ===== Pin Definitions =====
 const int rpmSensorPin = 19;
@@ -43,7 +46,7 @@ int max_position = 180;
 int neutral_position = 90;
 bool direction_reversed = false;
 
-// Pre-PID start position (for arming sequence) — now persisted
+// Pre-PID start position (for arming sequence) — persisted
 int pidStartPosition = 50;
 
 // Manual potentiometer calibration
@@ -96,7 +99,7 @@ int overrideThreshold = 3500;
 bool armSwitchPreviousState = false;
 
 // ===== PID control =====
-// Now persisted: setpointRPM, Kp/Ki/Kd, pidAggressiveness
+// Persisted: setpointRPM, Kp/Ki/Kd, pidAggressiveness
 double setpointRPM = 1000.0;
 double currentRPM = 0.0;
 double pidOutput = 0.0;
@@ -120,13 +123,66 @@ BluetoothSerial SerialBT;
 String btInputString = "";
 bool btStringComplete = false;
 
-// ===== Timing =====
-unsigned long lastPrintTime = 0;
-const unsigned long printInterval = 500;
+// ===== Telemetry Control (Persisted) =====
+// Desired default: MANUAL + telemetry OFF, then start streaming when ARMED.
+// We support three telemetry modes:
+//
+// AUTO: telemetryEnabled follows systemArmed
+// ON:   telemetryEnabled always true
+// OFF:  telemetryEnabled always false
+enum TelemetryMode : int {
+  TELE_AUTO = 0,
+  TELE_ON   = 1,
+  TELE_OFF  = 2
+};
+
+TelemetryMode telemetryMode = TELE_AUTO;   // persisted
+bool telemetryEnabled = false;             // derived runtime from telemetryMode + armed
+unsigned long telemetryIntervalMs = 500;   // persisted stream rate (ms)
+unsigned long lastTelemetryTime = 0;
+
+// Rate limits (keep sane and prevent flooding)
+const unsigned long telemetryRateMinMs = 50;
+const unsigned long telemetryRateMaxMs = 5000;
 
 // ===== Helpers =====
-void dualPrintln(String message) { Serial.println(message); SerialBT.println(message); }
-void dualPrint(String message) { Serial.print(message); SerialBT.print(message); }
+// "Event" output: always prints (USB + BT if connected)
+void dualPrintln(String message) {
+  Serial.println(message);
+  if (SerialBT.hasClient()) SerialBT.println(message);
+}
+void dualPrint(String message) {
+  Serial.print(message);
+  if (SerialBT.hasClient()) SerialBT.print(message);
+}
+
+// "Telemetry" output: only prints when telemetryEnabled == true
+void telePrintln(String message) {
+  if (!telemetryEnabled) return;
+  Serial.println(message);
+  if (SerialBT.hasClient()) SerialBT.println(message);
+}
+void telePrint(String message) {
+  if (!telemetryEnabled) return;
+  Serial.print(message);
+  if (SerialBT.hasClient()) SerialBT.print(message);
+}
+
+static const char* telemetryModeToString(TelemetryMode m) {
+  switch (m) {
+    case TELE_AUTO: return "AUTO";
+    case TELE_ON:   return "ON";
+    case TELE_OFF:  return "OFF";
+    default:        return "AUTO";
+  }
+}
+
+void applyTelemetryPolicy() {
+  // Derive telemetryEnabled from mode + armed state
+  if (telemetryMode == TELE_ON) telemetryEnabled = true;
+  else if (telemetryMode == TELE_OFF) telemetryEnabled = false;
+  else telemetryEnabled = systemArmed; // AUTO
+}
 
 // ===== Forward Decls =====
 void IRAM_ATTR rpmPulseISR();
@@ -135,6 +191,7 @@ void processInput();
 void processCommand(String command);
 void updateSystemState();
 bool attemptArm();
+void disarmSystem(const String &reason);
 void runPIDControl();
 void runManualControl();
 void updateOutputs();
@@ -143,8 +200,8 @@ int applyCalibration(int position);
 void processCalibrationCommand(String command);
 void processSafetyCommand(String command);
 
-void printStatus();
-void printDetailedStatus();
+void printStatus();          // telemetry stream
+void printDetailedStatus();  // on-demand, always prints
 void printHelp();
 void printCalibrationStatus();
 
@@ -156,12 +213,15 @@ bool setPidSampleTime(int newMs);
 bool setRpmAlpha(double newAlpha);
 bool setStartPosition(int newPos);
 
+bool setTelemetryMode(TelemetryMode m);
+bool setTelemetryRate(unsigned long ms);
+
 // ===== Setup =====
 void setup() {
   Serial.begin(115200);
 
-  loadCalibrationData();        // loads persisted values (if any)
-  settingsDirty = false;        // clean after load
+  loadCalibrationData();  // loads persisted values (if any)
+  settingsDirty = false;  // clean after load
 
   SerialBT.begin("EMC_Type_1_Controller");
   Serial.println("Bluetooth initialized. Device name: EMC_Type_1_Controller");
@@ -185,16 +245,26 @@ void setup() {
   myPID.SetMode(AUTOMATIC);
   myPID.SetOutputLimits(min_position, max_position);
   myPID.SetSampleTime(pidSampleTimeMs);
-  myPID.SetTunings(Kp, Ki, Kd);          // apply loaded tunings (if any)
+  myPID.SetTunings(Kp, Ki, Kd);
 
   digitalWrite(armLightPin, LOW);
 
   inputString.reserve(200);
   btInputString.reserve(200);
 
+  // Default safe state
+  systemArmed = false;
+  safetyOverrideActive = false;
+
+  // Apply telemetry policy based on loaded settings + disarmed state
+  applyTelemetryPolicy();
+  lastTelemetryTime = 0;
+
   Serial.println("=== EMC Type 1 Controller Initialized ===");
   printCalibrationStatus();
-  printStatus();
+  dualPrintln("Type 'help' for commands.");
+  dualPrintln("Telemetry mode: " + String(telemetryModeToString(telemetryMode)) +
+             " | rate: " + String(telemetryIntervalMs) + " ms");
 }
 
 // ===== Loop =====
@@ -208,13 +278,13 @@ void loop() {
 
   updateOutputs();
 
-  if (millis() - lastPrintTime >= printInterval) {
+  // Telemetry stream only when enabled
+  if (telemetryEnabled && (millis() - lastTelemetryTime >= telemetryIntervalMs)) {
     printStatus();
-    lastPrintTime = millis();
+    lastTelemetryTime = millis();
   }
 
   // delay removed for maximum responsiveness
-  // (Optional cooperative yield: delay(1);)
 }
 
 // ===== ISR =====
@@ -340,6 +410,28 @@ void processCommand(String command) {
     int newPPR = command.substring(4).toInt();
     if (!setPPR(newPPR, true)) dualPrintln("Invalid PPR. Allowed: 1, 2, 4");
   }
+  else if (command.startsWith("telemetry ")) {
+    String arg = command.substring(10);
+    arg.trim();
+
+    if (arg == "auto") {
+      setTelemetryMode(TELE_AUTO);
+    } else if (arg == "on") {
+      setTelemetryMode(TELE_ON);
+    } else if (arg == "off") {
+      setTelemetryMode(TELE_OFF);
+    } else if (arg.startsWith("rate ")) {
+      unsigned long ms = (unsigned long)arg.substring(5).toInt();
+      if (!setTelemetryRate(ms)) {
+        dualPrintln("Invalid telemetry rate. Range: " + String(telemetryRateMinMs) +
+                   "–" + String(telemetryRateMaxMs) + " ms");
+      }
+    } else {
+      dualPrintln("Usage:");
+      dualPrintln("  telemetry auto|on|off");
+      dualPrintln("  telemetry rate <ms>");
+    }
+  }
   else if (command == "save") {
     saveCalibrationData();
     settingsDirty = false;
@@ -358,8 +450,7 @@ void processCommand(String command) {
     attemptArm();
   }
   else if (command == "disarm") {
-    systemArmed = false;
-    dualPrintln("System DISARMED");
+    disarmSystem("System DISARMED");
   }
   else if (command == "status") {
     printDetailedStatus();
@@ -371,6 +462,53 @@ void processCommand(String command) {
     dualPrintln("Unknown command");
     dualPrintln("Type 'help' for available commands.");
   }
+}
+
+// ===== Telemetry setters (persisted via save) =====
+bool setTelemetryMode(TelemetryMode m) {
+  if (m != TELE_AUTO && m != TELE_ON && m != TELE_OFF) return false;
+
+  if (telemetryMode == m) {
+    dualPrintln("Telemetry mode unchanged (" + String(telemetryModeToString(telemetryMode)) + ")");
+    return true;
+  }
+
+  telemetryMode = m;
+  settingsDirty = true;
+
+  applyTelemetryPolicy();
+  if (telemetryEnabled) lastTelemetryTime = 0; // immediate print on next loop
+
+  dualPrintln("Telemetry mode set to: " + String(telemetryModeToString(telemetryMode)) +
+             " | telemetryEnabled: " + String(telemetryEnabled ? "true" : "false") +
+             " | (UNSAVED)");
+  return true;
+}
+
+bool setTelemetryRate(unsigned long ms) {
+  if (ms < telemetryRateMinMs || ms > telemetryRateMaxMs) return false;
+
+  if (telemetryIntervalMs == ms) {
+    dualPrintln("Telemetry rate unchanged (" + String(telemetryIntervalMs) + " ms)");
+    return true;
+  }
+
+  telemetryIntervalMs = ms;
+  settingsDirty = true;
+
+  if (telemetryEnabled) lastTelemetryTime = 0; // immediate print on next loop
+
+  dualPrintln("Telemetry rate set to: " + String(telemetryIntervalMs) + " ms | (UNSAVED)");
+  return true;
+}
+
+// ===== Disarm helper =====
+void disarmSystem(const String &reason) {
+  systemArmed = false;
+
+  applyTelemetryPolicy(); // AUTO mode will turn telemetry off when disarmed
+
+  dualPrintln(reason);
 }
 
 // ===== Set Start Position (persisted) =====
@@ -470,17 +608,17 @@ void updateSystemState() {
     }
     // Only disarm after pot drops below threshold
     else if (safetyOverrideActive && manualPotValue <= overrideThreshold) {
-      systemArmed = false;
       safetyOverrideActive = false;
-      dualPrintln("System disarmed after pot returned below threshold.");
+      disarmSystem("System disarmed after pot returned below threshold.");
     }
   }
 
   // Arm switch toggling
-  if (armSwitchCurrentState && !armSwitchPreviousState) attemptArm();
+  if (armSwitchCurrentState && !armSwitchPreviousState) {
+    attemptArm();
+  }
   else if (!armSwitchCurrentState && armSwitchPreviousState && systemArmed) {
-    systemArmed = false;
-    dualPrintln("System DISARMED via switch");
+    disarmSystem("System DISARMED via switch");
   }
 
   armSwitchPreviousState = armSwitchCurrentState;
@@ -498,6 +636,10 @@ bool attemptArm() {
 
   systemArmed = true;
   safetyOverrideActive = false;
+
+  applyTelemetryPolicy();
+  if (telemetryEnabled) lastTelemetryTime = 0; // immediate print on next loop
+
   dualPrintln("System ARMED - Automatic PID Mode");
   return true;
 }
@@ -542,7 +684,6 @@ void processCalibrationCommand(String command) {
       min_position = value;
       if (neutral_position < min_position) neutral_position = min_position;
       myPID.SetOutputLimits(min_position, max_position);
-      // keep pidStartPosition valid if user tightens limits
       pidStartPosition = constrain(pidStartPosition, min_position, max_position);
       servoPosition = applyCalibration(min_position);
       clutchServo.write(servoPosition);
@@ -633,8 +774,9 @@ void processSafetyCommand(String command) {
 }
 
 // ===== Status & Print =====
+// Telemetry stream (only prints when telemetryEnabled == true)
 void printStatus() {
-  dualPrint("RPM: " + String(currentRPM) +
+  telePrint("RPM: " + String(currentRPM) +
             " | Target: " + String(setpointRPM) +
             " | Servo: " + String(servoPosition) + "°" +
             " | Mode: " + (systemArmed ? "AUTO" : "MANUAL") +
@@ -643,10 +785,12 @@ void printStatus() {
             " | PPR: " + String(pulsesPerRevolution) +
             " | Ts: " + String(pidSampleTimeMs) + "ms" +
             " | Alpha: " + String(rpmFilterAlpha, 2) +
+            " | Tele: " + String(telemetryModeToString(telemetryMode)) + "@" + String(telemetryIntervalMs) + "ms" +
             " | " + (settingsDirty ? "UNSAVED" : "SAVED"));
-  dualPrintln("");
+  telePrintln("");
 }
 
+// On-demand status (always prints)
 void printDetailedStatus() {
   dualPrintln("=== STATUS ===");
   dualPrintln("RPM: " + String(currentRPM));
@@ -661,6 +805,9 @@ void printDetailedStatus() {
   dualPrintln("PID Sample Time: " + String(pidSampleTimeMs) + " ms");
   dualPrintln("RPM Filter Alpha: " + String(rpmFilterAlpha, 2));
   dualPrintln("Accepted Pulses Count (since boot): " + String((unsigned long)pulseCount));
+  dualPrintln("Telemetry Mode: " + String(telemetryModeToString(telemetryMode)));
+  dualPrintln("Telemetry Rate: " + String(telemetryIntervalMs) + " ms");
+  dualPrintln(String("telemetryEnabled: ") + (telemetryEnabled ? "true" : "false"));
   dualPrintln(String("settingsDirty: ") + (settingsDirty ? "true" : "false"));
   dualPrintln("================");
 }
@@ -674,6 +821,8 @@ void printHelp() {
   dualPrintln("  setsample <10-200>           (PID sample time ms) [UNSAVED until 'save']");
   dualPrintln("  setalpha <0.10-0.50>         (RPM EMA alpha)      [UNSAVED until 'save']");
   dualPrintln("  ppr <1|2|4>                  (auto-scales setpoint) [UNSAVED until 'save']");
+  dualPrintln("  telemetry auto|on|off        (stream policy)      [UNSAVED until 'save']");
+  dualPrintln("  telemetry rate <ms>          (50–5000 ms)         [UNSAVED until 'save']");
   dualPrintln("  calibrate ...                (servo/pot calib)    [UNSAVED until 'save']");
   dualPrintln("  safety ...                   (override settings) [UNSAVED until 'save']");
   dualPrintln("  save                         (write ALL settings to NVS)");
@@ -699,6 +848,8 @@ void printCalibrationStatus() {
   dualPrintln("PPR (pulses/rev): " + String(pulsesPerRevolution));
   dualPrintln("PID Sample Time: " + String(pidSampleTimeMs) + " ms");
   dualPrintln("RPM Filter Alpha: " + String(rpmFilterAlpha, 2));
+  dualPrintln("Telemetry: " + String(telemetryModeToString(telemetryMode)) +
+             " @ " + String(telemetryIntervalMs) + " ms");
   dualPrintln("===========================");
 }
 
@@ -733,6 +884,10 @@ void saveCalibrationData() {
   preferences.putDouble("ki", Ki);
   preferences.putDouble("kd", Kd);
   preferences.putDouble("aggr", pidAggressiveness);
+
+  // Telemetry settings (persisted)
+  preferences.putInt("tele_mode", (int)telemetryMode);
+  preferences.putInt("tele_ms", (int)telemetryIntervalMs);
 
   preferences.end();
   dualPrintln("Saved ALL settings to NVS.");
@@ -769,7 +924,6 @@ void loadCalibrationData() {
 
   // Persisted user-defined setup params
   pidStartPosition = preferences.getInt("start_pos", pidStartPosition);
-  // keep within servo range (and within min/max calibration)
   pidStartPosition = constrain(pidStartPosition, min_position, max_position);
 
   double loadedSetpoint = preferences.getDouble("setpoint", setpointRPM);
@@ -785,7 +939,16 @@ void loadCalibrationData() {
   double loadedAggr = preferences.getDouble("aggr", pidAggressiveness);
   if (loadedAggr >= 0.1 && loadedAggr <= 3.0) pidAggressiveness = loadedAggr;
 
+  // Telemetry persisted settings
+  int loadedTeleMode = preferences.getInt("tele_mode", (int)TELE_AUTO);
+  if (loadedTeleMode < 0 || loadedTeleMode > 2) loadedTeleMode = (int)TELE_AUTO;
+  telemetryMode = (TelemetryMode)loadedTeleMode;
+
+  int loadedTeleMs = preferences.getInt("tele_ms", 500);
+  if (loadedTeleMs < (int)telemetryRateMinMs) loadedTeleMs = telemetryRateMinMs;
+  if (loadedTeleMs > (int)telemetryRateMaxMs) loadedTeleMs = telemetryRateMaxMs;
+  telemetryIntervalMs = (unsigned long)loadedTeleMs;
+
   preferences.end();
   dualPrintln("Calibration/settings loaded from NVS.");
 }
-
