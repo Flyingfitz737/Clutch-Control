@@ -1,6 +1,3 @@
-Here’s a clean README-ready overview you can paste into GitHub (edit names/pins as needed).
-
----
 
 ## EMC Type 1 Controller — ESP32 Hydraulic Clutch Control
 
