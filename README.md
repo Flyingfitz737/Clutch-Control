@@ -92,12 +92,3 @@ The sketch is organized around a few core responsibilities:
 ## Notes / Intended Use
 
 This controller is designed for experimentation and controlled environments. If used on real equipment, implement appropriate mechanical and electrical safeguards (independent kill/disarm, proper power supply isolation for the servo, shielding on tach wiring, etc.).
-
----
-
-If you tell me your repo name and what you want the project to be called publicly (e.g., “EMC Type 1 Controller” vs “Hydraulic Clutch PID Controller”), I can tailor this into a polished README section with:
-
-* badges (build/license),
-* wiring diagram image placeholder,
-* quickstart steps,
-* and a clean “Configuration” table.
