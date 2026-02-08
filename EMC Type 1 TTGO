@@ -1,1 +1,1179 @@
+/******************************************************************************************
+ *  EMC Type 1 Controller for ESP32 (TTGO T-Display TFT VERSION) — BLE + Web GUI Compatible
+ *
+ *  WHAT CHANGED (vs your BluetoothSerial version)
+ *  - BluetoothSerial removed (BLE-only using NimBLE Nordic UART Service "NUS")
+ *  - Added standardized BLE UART UUIDs (same as UNO sketch)
+ *  - Added GUI protocol:
+ *      getall           -> key=value lines ending with "end"
+ *      get <key>        -> one key=value line
+ *    Telemetry emits:   tele k=v k=v ... end
+ *
+ *  BOARD: TTGO T-Display (ST7789)
+ *  NOTE: This is a complete sketch. Paste into a fresh .ino and compile.
+ ******************************************************************************************/
+
+#include <Arduino.h>
+#include <PID_v1.h>
+#include <ESP32Servo.h>
+#include <Preferences.h>
+#include <math.h>
+
+// TFT (TTGO T-Display screen ST7789)
+#include <TFT_eSPI.h>
+TFT_eSPI tft = TFT_eSPI();
+
+// BLE (NimBLE)
+#include <NimBLEDevice.h>
+
+// ===== Pin Definitions (TTGO T-Display SAFE MAP) =====
+// TFT uses: MOSI=19, SCLK=18, CS=5, DC=16, RST=23, BL=4  (DO NOT USE THESE)
+const int rpmSensorPin     = 27;  // interrupt-capable, safe
+const int potentiometerPin = 34;  // ADC1 input-only, safe
+const int manualPotPin     = 32;  // ADC1, safe
+const int servoPin         = 26;  // PWM-capable, safe
+const int armSwitchPin     = 25;  // digital input, safe
+
+// ===== Preferences =====
+Preferences preferences;
+
+// ===== Dirty Flag =====
+bool settingsDirty = false;
+
+// ===== Servo calibration =====
+int min_position = 0;
+int max_position = 180;
+int neutral_position = 90;
+bool direction_reversed = false;
+
+// Pre-PID start position (for arming sequence) — persisted
+int pidStartPosition = 50;
+
+// Manual potentiometer calibration
+int manualPotMin = 0;
+int manualPotMax = 4095;
+
+// ===== RPM (period-based) =====
+int pulsesPerRevolution = 1; // persisted
+
+volatile unsigned long lastPulseMicros = 0;     // last ACCEPTED pulse time
+volatile unsigned long pulsePeriodMicros = 0;   // most recent ACCEPTED period
+volatile bool newPeriodAvailable = false;
+volatile unsigned long pulseCount = 0;
+
+const unsigned long minPulsePeriodMicros = 200; // reject absurdly fast edges (noise)
+const unsigned long rpmTimeoutMicros = 300000;  // if no accepted pulse for 0.30s -> RPM = 0
+
+double rpmFilterAlpha = 0.30; // persisted
+
+// ===== Sensor readings =====
+int potValue = 0;
+int manualPotValue = 0;
+bool armSwitch = false;
+
+// ===== System state =====
+bool systemArmed = false;
+
+// ===== Safety override (2-stage + latched annunciation) =====
+bool overrideEnabled = false;
+
+// 2-stage override state:
+// - overridePending: pot >= threshold while ARMED; keep PID active + keep ARMED UI
+// - overrideLatched: after pot returns below threshold, system DISARMS then OVERRIDE UI latches until physical re-arm
+bool overridePending = false;
+bool overrideLatched = false;
+
+// Override threshold is % of calibrated travel + optional sense reverse (persisted)
+int  overrideThresholdPct = 85;      // 0–100, persisted
+bool overrideSenseReversed = false;  // persisted
+
+bool armSwitchPreviousState = false;
+
+// ===== PID control =====
+double setpointRPM = 1000.0;
+double currentRPM = 0.0;
+double pidOutput = 0.0;
+double Kp = 2.0, Ki = 5.0, Kd = 1.0;
+
+double pidAggressiveness = 1.0; // 0.1–3.0
+int pidSampleTimeMs = 100;      // 10–200 ms, persisted
+
+// ===== PID Direction (persisted) =====
+enum PidDirectionSetting : int {
+  PID_DIR_DIRECT  = 0,
+  PID_DIR_REVERSE = 1
+};
+PidDirectionSetting pidDirectionSetting = PID_DIR_DIRECT; // persisted
+
+static const char* pidDirToString(PidDirectionSetting d) {
+  return (d == PID_DIR_REVERSE) ? "REVERSE" : "DIRECT";
+}
+
+// ===== Servo =====
+Servo clutchServo;
+int servoPosition = 90;
+
+// ===== PID =====
+// Constructor direction value will be overridden in setup() via SetControllerDirection()
+PID myPID(&currentRPM, &pidOutput, &setpointRPM, Kp, Ki, Kd, DIRECT);
+
+// ===== Telemetry Control (Persisted) =====
+enum TelemetryMode : int {
+  TELE_AUTO = 0,
+  TELE_ON   = 1,
+  TELE_OFF  = 2
+};
+
+TelemetryMode telemetryMode = TELE_AUTO;   // persisted
+bool telemetryEnabled = false;             // derived runtime
+unsigned long telemetryIntervalMs = 500;   // persisted stream rate (ms)
+unsigned long lastTelemetryTime = 0;
+
+const unsigned long telemetryRateMinMs = 50;
+const unsigned long telemetryRateMaxMs = 5000;
+
+static const char* telemetryModeToString(TelemetryMode m) {
+  switch (m) {
+    case TELE_AUTO: return "AUTO";
+    case TELE_ON:   return "ON";
+    case TELE_OFF:  return "OFF";
+    default:        return "AUTO";
+  }
+}
+
+void applyTelemetryPolicy() {
+  if (telemetryMode == TELE_ON) telemetryEnabled = true;
+  else if (telemetryMode == TELE_OFF) telemetryEnabled = false;
+  else telemetryEnabled = systemArmed; // AUTO
+}
+
+// ===== Override normalization helpers =====
+double getManualPotNormForOverride(int rawAdc) {
+  const int span = manualPotMax - manualPotMin;
+  if (span <= 0) return 0.0;
+
+  double norm = ((double)rawAdc - (double)manualPotMin) / (double)span;
+  if (norm < 0.0) norm = 0.0;
+  if (norm > 1.0) norm = 1.0;
+
+  if (overrideSenseReversed) norm = 1.0 - norm;
+  return norm;
+}
+
+int adcToPctForOverride(int adc) {
+  double norm = getManualPotNormForOverride(adc);
+  int pct = (int)lround(norm * 100.0);
+  return constrain(pct, 0, 100);
+}
+
+int pctToAdcForOverride(int pct) {
+  pct = constrain(pct, 0, 100);
+
+  const int span = manualPotMax - manualPotMin;
+  if (span <= 0) return manualPotMin;
+
+  double norm = (double)pct / 100.0;
+  if (overrideSenseReversed) norm = 1.0 - norm;
+
+  int adc = (int)lround((double)manualPotMin + norm * (double)span);
+  return constrain(adc, manualPotMin, manualPotMax);
+}
+
+bool setOverrideThresholdPct(int pct) {
+  if (pct < 0 || pct > 100) return false;
+  if (pct == overrideThresholdPct) {
+    // unchanged
+    return true;
+  }
+  overrideThresholdPct = pct;
+  settingsDirty = true;
+  return true;
+}
+
+bool setOverrideSenseReversed(bool reversed) {
+  if (overrideSenseReversed == reversed) return true;
+  overrideSenseReversed = reversed;
+  settingsDirty = true;
+  return true;
+}
+
+// Legacy setter: accepts ADC threshold but converts to coherent % under current calibration/sense
+bool setOverrideThresholdAdcLegacy(int adc) {
+  adc = constrain(adc, manualPotMin, manualPotMax);
+  int pct = adcToPctForOverride(adc);
+  overrideThresholdPct = pct;
+  settingsDirty = true;
+  return true;
+}
+
+// ===== PID direction setter =====
+bool setPidDirectionSetting(PidDirectionSetting d) {
+  if (d != PID_DIR_DIRECT && d != PID_DIR_REVERSE) return false;
+
+  if (systemArmed) {
+    // reject change while armed
+    return false;
+  }
+
+  if (pidDirectionSetting == d) return true;
+
+  pidDirectionSetting = d;
+  myPID.SetControllerDirection((pidDirectionSetting == PID_DIR_REVERSE) ? REVERSE : DIRECT);
+
+  settingsDirty = true;
+  return true;
+}
+
+// =========================================================================================
+// BLE UART (Nordic UART Service - NUS)  [matches UNO sketch and the web GUI]
+// =========================================================================================
+static const char* BLE_NAME = "EMC_TTGO";
+
+static NimBLEUUID NUS_SERVICE("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+static NimBLEUUID NUS_RX     ("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // write
+static NimBLEUUID NUS_TX     ("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"); // notify
+
+static NimBLECharacteristic* txChar = nullptr;
+static bool bleConnected = false;
+static String bleRxBuf;
+
+void bleSend(const String& s) {
+  if (!bleConnected || !txChar) return;
+
+  const int CHUNK = 180;
+  int i = 0;
+  while (i < (int)s.length()) {
+    String part = s.substring(i, i + CHUNK);
+    txChar->setValue(part.c_str());
+    txChar->notify();
+    i += CHUNK;
+    delay(2);
+  }
+}
+void bleSendLine(const String& s) { bleSend(s + "\n"); }
+
+void ioPrintln(const String& s) {
+  Serial.println(s);
+  if (bleConnected) bleSendLine(s);
+}
+void ioPrint(const String& s) {
+  Serial.print(s);
+  if (bleConnected) bleSend(s);
+}
+
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer*) override {
+    bleConnected = true;
+    Serial.println("[BLE] connected");
+  }
+  void onDisconnect(NimBLEServer* server) override {
+    bleConnected = false;
+    Serial.println("[BLE] disconnected");
+    server->startAdvertising();
+  }
+};
+
+void processCommand(String command); // fwd
+
+class RxCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c) override {
+    std::string v = c->getValue();
+    if (v.empty()) return;
+
+    for (char ch : v) {
+      if (ch == '\r') continue;
+      if (ch == '\n') {
+        String line = bleRxBuf;
+        bleRxBuf = "";
+        line.trim();
+        if (line.length()) processCommand(line);
+      } else {
+        if (bleRxBuf.length() < 240) bleRxBuf += ch;
+      }
+    }
+  }
+};
+
+void bleInit() {
+  NimBLEDevice::init(BLE_NAME);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+  NimBLEServer* server = NimBLEDevice::createServer();
+  server->setCallbacks(new ServerCallbacks());
+
+  NimBLEService* svc = server->createService(NUS_SERVICE);
+
+  txChar = svc->createCharacteristic(NUS_TX, NIMBLE_PROPERTY::NOTIFY);
+  NimBLECharacteristic* rx = svc->createCharacteristic(NUS_RX, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  rx->setCallbacks(new RxCallbacks());
+
+  svc->start();
+
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(NUS_SERVICE);
+  adv->setScanResponse(true);
+  adv->start();
+
+  Serial.println("[BLE] advertising as " + String(BLE_NAME));
+}
+
+// =========================================================================================
+// TFT UI
+// =========================================================================================
+enum UiState : int { UI_MANUAL=0, UI_ARMED=1, UI_OVERRIDE=2 };
+UiState lastUiState = UI_MANUAL;
+
+unsigned long lastRpmDrawMs = 0;
+const unsigned long rpmDrawIntervalMs = 200;
+
+double lastShownRPM = -1;
+double lastShownTarget = -1;
+
+void getUiColors(UiState s, uint16_t &bg, uint16_t &fg, const char* &msg) {
+  switch (s) {
+    case UI_OVERRIDE: bg = TFT_RED;    fg = TFT_BLACK; msg = "OVERRIDE"; break;
+    case UI_ARMED:    bg = TFT_YELLOW; fg = TFT_BLACK; msg = "ARMED";    break;
+    case UI_MANUAL:
+    default:          bg = TFT_GREEN;  fg = TFT_BLACK; msg = "MANUAL";   break;
+  }
+}
+
+void drawModeScreen(UiState s) {
+  uint16_t bg, fg;
+  const char* msg;
+  getUiColors(s, bg, fg, msg);
+
+  tft.fillScreen(bg);
+
+  tft.setTextColor(fg, bg);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(3);
+
+  int cx = tft.width() / 2;
+  int cy = tft.height() / 2;
+
+  tft.drawString(msg, cx, cy - 18);
+
+  lastRpmDrawMs = 0;
+  lastShownRPM = -1;
+  lastShownTarget = -1;
+}
+
+void drawRpmLine(UiState s) {
+  uint16_t bg, fg;
+  const char* msg;
+  getUiColors(s, bg, fg, msg);
+
+  int rpmNow = (int)lround(currentRPM);
+  int rpmTgt = (int)lround(setpointRPM);
+
+  if (fabs(currentRPM - lastShownRPM) < 1.0 && fabs(setpointRPM - lastShownTarget) < 1.0) return;
+  lastShownRPM = currentRPM;
+  lastShownTarget = setpointRPM;
+
+  String line = "RPM " + String(rpmNow) + " / " + String(rpmTgt);
+
+  int cx = tft.width() / 2;
+  int cy = tft.height() / 2;
+  int y  = cy + 22;
+
+  const int stripH = 26;
+  tft.fillRect(0, y - (stripH / 2), tft.width(), stripH, bg);
+
+  tft.setTextColor(fg, bg);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2);
+  tft.drawString(line, cx, y);
+}
+
+void updateModeAndRpmScreen() {
+  UiState s;
+  if (overrideLatched) s = UI_OVERRIDE;    // OVERRIDE only after disarm (latched)
+  else if (systemArmed) s = UI_ARMED;
+  else s = UI_MANUAL;
+
+  if (s != lastUiState) {
+    drawModeScreen(s);
+    lastUiState = s;
+  }
+
+  if (millis() - lastRpmDrawMs >= rpmDrawIntervalMs) {
+    drawRpmLine(lastUiState);
+    lastRpmDrawMs = millis();
+  }
+}
+
+// =========================================================================================
+// Forward decls
+// =========================================================================================
+void IRAM_ATTR rpmPulseISR();
+void readSensors();
+void updateSystemState();
+bool attemptArm();
+bool attemptArmFromSwitch();
+void disarmSystem(const String &reason);
+void runPIDControl();
+void runManualControl();
+void updateOutputs();
+int applyCalibration(int position);
+
+void processCalibrationCommand(String command);
+void processSafetyCommand(String command);
+
+void printDetailedStatus();
+void printHelp();
+void printCalibrationStatus();
+
+void saveCalibrationData();
+void loadCalibrationData();
+
+// ===== Optional serial input (bench/debug) =====
+String inputString = "";
+bool stringComplete = false;
+
+void processSerialInput() {
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    if (inChar == '\n') stringComplete = true;
+    else inputString += inChar;
+  }
+  if (stringComplete) {
+    inputString.trim();
+    if (inputString.length()) processCommand(inputString);
+    inputString = "";
+    stringComplete = false;
+  }
+}
+
+// =========================================================================================
+// GUI protocol helpers: getall/get + telemetry line
+// =========================================================================================
+String kv(const char* k, const String& v) { return String(k) + "=" + v; }
+String kv(const char* k, double v, int dp=2) { return String(k) + "=" + String(v, dp); }
+String kv(const char* k, int v) { return String(k) + "=" + String(v); }
+
+String modeString() { return systemArmed ? "AUTO" : "MANUAL"; }
+
+void emitGetAll() {
+  ioPrintln(kv("rpm", (int)lround(currentRPM)));
+  ioPrintln(kv("target", (int)lround(setpointRPM)));
+  ioPrintln(kv("servo", servoPosition));
+  ioPrintln(kv("mode", modeString()));
+  ioPrintln(kv("kp", String(Kp, 6)));
+  ioPrintln(kv("ki", String(Ki, 6)));
+  ioPrintln(kv("kd", String(Kd, 6)));
+  ioPrintln(kv("aggr", String(pidAggressiveness, 3)));
+  ioPrintln(kv("ppr", pulsesPerRevolution));
+  ioPrintln(kv("ts", pidSampleTimeMs));
+  ioPrintln(kv("alpha", String(rpmFilterAlpha, 3)));
+  ioPrintln(kv("pid_dir", pidDirToString(pidDirectionSetting)));
+  ioPrintln(kv("tele_mode", telemetryModeToString(telemetryMode)));
+  ioPrintln(kv("tele_ms", (int)telemetryIntervalMs));
+  ioPrintln(kv("override_en", overrideEnabled ? 1 : 0));
+  ioPrintln(kv("ov_thr_pct", overrideThresholdPct));
+  ioPrintln(kv("ov_sense", overrideSenseReversed ? 1 : 0));
+  ioPrintln(kv("pending", overridePending ? 1 : 0));
+  ioPrintln(kv("latched", overrideLatched ? 1 : 0));
+  ioPrintln(kv("dirty", settingsDirty ? 1 : 0));
+  ioPrintln("end");
+}
+
+bool emitGetKey(const String& key) {
+  String k = key; k.toLowerCase();
+  if (k == "rpm")            ioPrintln(kv("rpm", (int)lround(currentRPM)));
+  else if (k == "target")    ioPrintln(kv("target", (int)lround(setpointRPM)));
+  else if (k == "servo")     ioPrintln(kv("servo", servoPosition));
+  else if (k == "mode")      ioPrintln(kv("mode", modeString()));
+  else if (k == "kp")        ioPrintln(kv("kp", String(Kp, 6)));
+  else if (k == "ki")        ioPrintln(kv("ki", String(Ki, 6)));
+  else if (k == "kd")        ioPrintln(kv("kd", String(Kd, 6)));
+  else if (k == "aggr")      ioPrintln(kv("aggr", String(pidAggressiveness, 3)));
+  else if (k == "ppr")       ioPrintln(kv("ppr", pulsesPerRevolution));
+  else if (k == "ts")        ioPrintln(kv("ts", pidSampleTimeMs));
+  else if (k == "alpha")     ioPrintln(kv("alpha", String(rpmFilterAlpha, 3)));
+  else if (k == "pid_dir")   ioPrintln(kv("pid_dir", pidDirToString(pidDirectionSetting)));
+  else if (k == "tele_mode") ioPrintln(kv("tele_mode", telemetryModeToString(telemetryMode)));
+  else if (k == "tele_ms")   ioPrintln(kv("tele_ms", (int)telemetryIntervalMs)));
+  else if (k == "dirty")     ioPrintln(kv("dirty", settingsDirty ? 1 : 0));
+  else return false;
+  return true;
+}
+
+void emitTelemetryKvLine() {
+  if (!telemetryEnabled) return;
+  String line = "tele ";
+  line += kv("rpm", (int)lround(currentRPM)) + " ";
+  line += kv("target", (int)lround(setpointRPM)) + " ";
+  line += kv("servo", servoPosition) + " ";
+  line += kv("mode", modeString()) + " ";
+  line += kv("pid_out", (int)lround(pidOutput)) + " ";
+  line += kv("dirty", settingsDirty ? 1 : 0) + " ";
+  line += "end";
+  ioPrintln(line);
+}
+
+// =========================================================================================
+// Setup / Loop
+// =========================================================================================
+void setup() {
+  Serial.begin(115200);
+
+  // TFT init early
+  tft.init();
+  tft.setRotation(1); // landscape
+  tft.fillScreen(TFT_BLACK);
+
+  loadCalibrationData();
+  settingsDirty = false;
+
+  bleInit();
+
+  pinMode(rpmSensorPin, INPUT_PULLUP);
+  pinMode(potentiometerPin, INPUT);
+  pinMode(manualPotPin, INPUT);
+  pinMode(armSwitchPin, INPUT_PULLUP);
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(potentiometerPin, ADC_11db);
+  analogSetPinAttenuation(manualPotPin, ADC_11db);
+
+  attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulseISR, FALLING);
+
+  clutchServo.attach(servoPin);
+  servoPosition = neutral_position;
+  clutchServo.write(servoPosition);
+
+  // Apply PID config (including persisted direction) BEFORE enabling automatic compute
+  myPID.SetControllerDirection((pidDirectionSetting == PID_DIR_REVERSE) ? REVERSE : DIRECT);
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(min_position, max_position);
+  myPID.SetSampleTime(pidSampleTimeMs);
+  myPID.SetTunings(Kp, Ki, Kd);
+
+  inputString.reserve(200);
+
+  systemArmed = false;
+  overridePending = false;
+  overrideLatched = false;
+
+  applyTelemetryPolicy();
+  lastTelemetryTime = 0;
+
+  // Draw initial UI
+  lastUiState = UI_MANUAL;
+  drawModeScreen(UI_MANUAL);
+
+  ioPrintln("=== EMC Type 1 Controller (TTGO TFT) Initialized ===");
+  printCalibrationStatus();
+  ioPrintln("Type 'help' for commands. GUI: use getall");
+}
+
+void loop() {
+  readSensors();
+  processSerialInput(); // optional bench
+  updateSystemState();
+
+  if (systemArmed) runPIDControl();
+  else runManualControl();
+
+  updateOutputs(); // TFT UI update
+
+  if (telemetryEnabled && (millis() - lastTelemetryTime >= telemetryIntervalMs)) {
+    emitTelemetryKvLine();
+    lastTelemetryTime = millis();
+  }
+}
+
+// =========================================================================================
+// ISR + sensors
+// =========================================================================================
+void IRAM_ATTR rpmPulseISR() {
+  const unsigned long now = micros();
+  const unsigned long dt  = now - lastPulseMicros;
+
+  if (dt >= minPulsePeriodMicros) {
+    lastPulseMicros = now;
+    pulsePeriodMicros = dt;
+    newPeriodAvailable = true;
+    pulseCount++;
+  }
+}
+
+void readSensors() {
+  const unsigned long now = micros();
+
+  unsigned long period;
+  unsigned long lastPulse;
+  bool hasNew;
+
+  noInterrupts();
+  period = pulsePeriodMicros;
+  lastPulse = lastPulseMicros;
+  hasNew = newPeriodAvailable;
+  newPeriodAvailable = false;
+  interrupts();
+
+  if (now - lastPulse > rpmTimeoutMicros) {
+    currentRPM = 0.0;
+  } else if (hasNew && period > 0 && pulsesPerRevolution > 0) {
+    const double rpmInstant = 60000000.0 / (period * (double)pulsesPerRevolution);
+    if (currentRPM <= 0.0) currentRPM = rpmInstant;
+    else currentRPM = (1.0 - rpmFilterAlpha) * currentRPM + rpmFilterAlpha * rpmInstant;
+  }
+
+  potValue = analogRead(potentiometerPin);
+  manualPotValue = analogRead(manualPotPin);
+  armSwitch = !digitalRead(armSwitchPin);
+}
+
+// =========================================================================================
+// Commands
+// =========================================================================================
+void processCommand(String command) {
+  command.trim();
+  if (!command.length()) return;
+
+  String lower = command;
+  lower.toLowerCase();
+
+  // --- GUI protocol ---
+  if (lower == "getall") { emitGetAll(); return; }
+  if (lower.startsWith("get ")) {
+    String key = command.substring(4);
+    key.trim();
+    if (!emitGetKey(key)) ioPrintln("err=unknown_key");
+    return;
+  }
+
+  // ===== Your existing command set (same semantics as before) =====
+  if (lower.startsWith("setrpm ")) {
+    double newSetpoint = lower.substring(7).toDouble();
+    if (newSetpoint > 0 && newSetpoint <= 100000) {
+      setpointRPM = newSetpoint;
+      settingsDirty = true;
+      ioPrintln("ok=setrpm");
+    } else ioPrintln("err=bad_rpm");
+  }
+  else if (lower.startsWith("setpid ")) {
+    int firstSpace = lower.indexOf(' ', 7);
+    int secondSpace = lower.indexOf(' ', firstSpace + 1);
+    if (firstSpace > 0 && secondSpace > 0) {
+      double newKp = lower.substring(7, firstSpace).toDouble();
+      double newKi = lower.substring(firstSpace + 1, secondSpace).toDouble();
+      double newKd = lower.substring(secondSpace + 1).toDouble();
+      if (newKp >= 0 && newKi >= 0 && newKd >= 0) {
+        Kp = newKp; Ki = newKi; Kd = newKd;
+        myPID.SetTunings(Kp, Ki, Kd);
+        settingsDirty = true;
+        ioPrintln("ok=setpid");
+      } else ioPrintln("err=bad_pid");
+    } else ioPrintln("err=usage_setpid");
+  }
+  else if (lower.startsWith("aggressiveness ")) {
+    double value = lower.substring(14).toDouble();
+    if (value >= 0.1 && value <= 3.0) {
+      pidAggressiveness = value;
+      settingsDirty = true;
+      ioPrintln("ok=aggr");
+    } else ioPrintln("err=bad_aggr");
+  }
+  else if (lower.startsWith("setstart ")) {
+    int v = lower.substring(9).toInt();
+    if (v < min_position || v > max_position) ioPrintln("err=bad_setstart");
+    else { pidStartPosition = v; settingsDirty = true; ioPrintln("ok=setstart"); }
+  }
+  else if (lower.startsWith("setsample ")) {
+    int newMs = lower.substring(10).toInt();
+    if (newMs < 10 || newMs > 200) ioPrintln("err=bad_sample");
+    else { pidSampleTimeMs = newMs; myPID.SetSampleTime(pidSampleTimeMs); settingsDirty = true; ioPrintln("ok=setsample"); }
+  }
+  else if (lower.startsWith("setalpha ")) {
+    double a = lower.substring(9).toDouble();
+    if (a < 0.10 || a > 0.50) ioPrintln("err=bad_alpha");
+    else { rpmFilterAlpha = a; settingsDirty = true; ioPrintln("ok=setalpha"); }
+  }
+  else if (lower.startsWith("ppr ")) {
+    int newPPR = lower.substring(4).toInt();
+    if (!(newPPR == 1 || newPPR == 2 || newPPR == 4)) ioPrintln("err=bad_ppr");
+    else {
+      int oldPPR = pulsesPerRevolution;
+      setpointRPM = setpointRPM * ((double)oldPPR / (double)newPPR);
+      pulsesPerRevolution = newPPR;
+      settingsDirty = true;
+      ioPrintln("ok=ppr");
+    }
+  }
+  else if (lower.startsWith("piddir ")) {
+    String arg = lower.substring(7); arg.trim();
+    if (arg == "direct") {
+      if (setPidDirectionSetting(PID_DIR_DIRECT)) ioPrintln("ok=piddir");
+      else ioPrintln("err=piddir_rejected");
+    } else if (arg == "reverse" || arg == "reversed") {
+      if (setPidDirectionSetting(PID_DIR_REVERSE)) ioPrintln("ok=piddir");
+      else ioPrintln("err=piddir_rejected");
+    } else ioPrintln("err=usage_piddir");
+  }
+  else if (lower.startsWith("telemetry ")) {
+    String arg = lower.substring(10);
+    arg.trim();
+
+    if (arg == "auto") {
+      telemetryMode = TELE_AUTO;
+      settingsDirty = true;
+      applyTelemetryPolicy();
+      if (telemetryEnabled) lastTelemetryTime = 0;
+      ioPrintln("ok=telemetry");
+    } else if (arg == "on") {
+      telemetryMode = TELE_ON;
+      settingsDirty = true;
+      applyTelemetryPolicy();
+      lastTelemetryTime = 0;
+      ioPrintln("ok=telemetry");
+    } else if (arg == "off") {
+      telemetryMode = TELE_OFF;
+      settingsDirty = true;
+      applyTelemetryPolicy();
+      ioPrintln("ok=telemetry");
+    } else if (arg.startsWith("rate ")) {
+      unsigned long ms = (unsigned long)arg.substring(5).toInt();
+      if (ms < telemetryRateMinMs || ms > telemetryRateMaxMs) {
+        ioPrintln("err=bad_telrate");
+      } else {
+        telemetryIntervalMs = ms;
+        settingsDirty = true;
+        if (telemetryEnabled) lastTelemetryTime = 0;
+        ioPrintln("ok=telrate");
+      }
+    } else ioPrintln("err=usage_telemetry");
+  }
+  else if (lower == "save") {
+    saveCalibrationData();
+    settingsDirty = false;
+    ioPrintln("ok=save");
+  }
+  else if (lower == "dirty") {
+    ioPrintln(String("dirty=") + (settingsDirty ? "1" : "0"));
+  }
+  else if (lower.startsWith("calibrate ")) {
+    processCalibrationCommand(lower.substring(10));
+  }
+  else if (lower.startsWith("safety ")) {
+    processSafetyCommand(lower.substring(7));
+  }
+  else if (lower == "arm") {
+    if (overrideLatched) ioPrintln("err=override_latched");
+    else attemptArm();
+  }
+  else if (lower == "disarm") {
+    disarmSystem("System DISARMED (command)");
+  }
+  else if (lower == "status") {
+    printDetailedStatus();
+  }
+  else if (lower == "help") {
+    printHelp();
+  }
+  else {
+    ioPrintln("err=unknown_cmd");
+  }
+}
+
+// ===== Disarm helper =====
+void disarmSystem(const String &reason) {
+  systemArmed = false;
+  overridePending = false;
+  applyTelemetryPolicy();
+  ioPrintln(reason);
+}
+
+// ===== PID & Manual Control =====
+void runPIDControl() {
+  if (myPID.Compute()) {
+    double scaledOutput = pidOutput * pidAggressiveness;
+    scaledOutput = constrain(scaledOutput, min_position, max_position);
+    servoPosition = applyCalibration((int)scaledOutput);
+    clutchServo.write(servoPosition);
+  }
+}
+
+void runManualControl() {
+  int rawPosition = map(manualPotValue, manualPotMin, manualPotMax, min_position, max_position);
+  rawPosition = constrain(rawPosition, min_position, max_position);
+  servoPosition = applyCalibration(rawPosition);
+  clutchServo.write(servoPosition);
+}
+
+// ===== System State =====
+void updateSystemState() {
+  bool armSwitchCurrentState = armSwitch;
+
+  if (!overrideEnabled) {
+    overridePending = false;
+    overrideLatched = false;
+  }
+
+  static bool wasOverridePending = false;
+
+  if (overrideEnabled && systemArmed) {
+    const double manualNorm = getManualPotNormForOverride(manualPotValue);
+    const double threshNorm = (double)overrideThresholdPct / 100.0;
+
+    if (manualNorm >= threshNorm) {
+      overridePending = true;
+      if (!wasOverridePending) {
+        ioPrintln("OVERRIDE PENDING: manual pot >= threshold; PID remains ACTIVE.");
+      }
+    }
+
+    if (overridePending && (manualNorm < threshNorm)) {
+      disarmSystem("OVERRIDE RECOVERED: manual pot below threshold; now MANUAL.");
+      overrideLatched = true;
+      ioPrintln("OVERRIDE LATCHED: requires ARM SWITCH re-arm.");
+    }
+  }
+
+  wasOverridePending = overridePending;
+
+  if (armSwitchCurrentState && !armSwitchPreviousState) {
+    attemptArmFromSwitch();
+  } else if (!armSwitchCurrentState && armSwitchPreviousState && systemArmed) {
+    disarmSystem("System DISARMED via switch");
+  }
+
+  armSwitchPreviousState = armSwitchCurrentState;
+}
+
+// ===== Arming =====
+bool attemptArm() {
+  if (overrideEnabled) {
+    const double manualNorm = getManualPotNormForOverride(manualPotValue);
+    const double threshNorm = (double)overrideThresholdPct / 100.0;
+    if (manualNorm >= threshNorm) {
+      ioPrintln("Cannot arm: manual pot at/above threshold.");
+      return false;
+    }
+  }
+
+  servoPosition = applyCalibration(pidStartPosition);
+  clutchServo.write(servoPosition);
+
+  systemArmed = true;
+  overridePending = false;
+
+  applyTelemetryPolicy();
+  if (telemetryEnabled) lastTelemetryTime = 0;
+
+  ioPrintln("System ARMED - Automatic PID Mode");
+  return true;
+}
+
+bool attemptArmFromSwitch() {
+  if (overrideLatched) {
+    overrideLatched = false;
+    ioPrintln("OVERRIDE CLEARED: ARM SWITCH re-arm requested.");
+  }
+  return attemptArm();
+}
+
+// ===== Outputs (TFT UI) =====
+void updateOutputs() {
+  updateModeAndRpmScreen();
+}
+
+// ===== Calibration Helpers =====
+int applyCalibration(int position) {
+  position = constrain(position, min_position, max_position);
+  if (direction_reversed) position = max_position - (position - min_position);
+  return position;
+}
+
+// ===== Calibration Commands =====
+void processCalibrationCommand(String command) {
+  command.trim(); command.toLowerCase();
+
+  if (command.startsWith("set_min ")) {
+    int value = command.substring(8).toInt();
+    if (value >= 0 && value < max_position) {
+      min_position = value;
+      if (neutral_position < min_position) neutral_position = min_position;
+      myPID.SetOutputLimits(min_position, max_position);
+      pidStartPosition = constrain(pidStartPosition, min_position, max_position);
+      servoPosition = applyCalibration(min_position);
+      clutchServo.write(servoPosition);
+      settingsDirty = true;
+      ioPrintln("ok=cal_set_min");
+    } else ioPrintln("err=cal_set_min");
+  }
+  else if (command.startsWith("set_max ")) {
+    int value = command.substring(8).toInt();
+    if (value > min_position && value <= 180) {
+      max_position = value;
+      if (neutral_position > max_position) neutral_position = max_position;
+      myPID.SetOutputLimits(min_position, max_position);
+      pidStartPosition = constrain(pidStartPosition, min_position, max_position);
+      servoPosition = applyCalibration(max_position);
+      clutchServo.write(servoPosition);
+      settingsDirty = true;
+      ioPrintln("ok=cal_set_max");
+    } else ioPrintln("err=cal_set_max");
+  }
+  else if (command.startsWith("set_neutral ")) {
+    int value = command.substring(12).toInt();
+    if (value >= min_position && value <= max_position) {
+      neutral_position = value;
+      servoPosition = applyCalibration(neutral_position);
+      clutchServo.write(servoPosition);
+      settingsDirty = true;
+      ioPrintln("ok=cal_set_neutral");
+    } else ioPrintln("err=cal_set_neutral");
+  }
+  else if (command.startsWith("direction ")) {
+    int value = command.substring(10).toInt();
+    if (value == 0 || value == 1) {
+      direction_reversed = (value == 1);
+      servoPosition = applyCalibration(servoPosition);
+      clutchServo.write(servoPosition);
+      settingsDirty = true;
+      ioPrintln("ok=cal_direction");
+    } else ioPrintln("err=cal_direction");
+  }
+  else if (command.startsWith("pot_min ")) {
+    int value = command.substring(8).toInt();
+    if (value >= 0 && value < manualPotMax) {
+      manualPotMin = value;
+      settingsDirty = true;
+      ioPrintln("ok=cal_pot_min");
+    } else ioPrintln("err=cal_pot_min");
+  }
+  else if (command.startsWith("pot_max ")) {
+    int value = command.substring(8).toInt();
+    if (value > manualPotMin && value <= 4095) {
+      manualPotMax = value;
+      settingsDirty = true;
+      ioPrintln("ok=cal_pot_max");
+    } else ioPrintln("err=cal_pot_max");
+  }
+  else {
+    ioPrintln("err=unknown_cal");
+  }
+}
+
+// ===== Safety Commands =====
+void processSafetyCommand(String command) {
+  command.trim(); command.toLowerCase();
+
+  if (command == "enable") {
+    overrideEnabled = true;
+    settingsDirty = true;
+    ioPrintln("ok=safety_enable");
+  }
+  else if (command == "disable") {
+    overrideEnabled = false;
+    overridePending = false;
+    overrideLatched = false;
+    settingsDirty = true;
+    ioPrintln("ok=safety_disable");
+  }
+  else if (command.startsWith("set_threshold ")) {
+    // legacy ADC threshold, converts to %
+    int value = command.substring(14).toInt();
+    if (value >= manualPotMin && value <= manualPotMax) {
+      setOverrideThresholdAdcLegacy(value);
+      ioPrintln("ok=thr_adc");
+    } else ioPrintln("err=bad_thr_adc");
+  }
+  else if (command.startsWith("set_threshold_pct ")) {
+    int pct = command.substring(18).toInt();
+    if (!setOverrideThresholdPct(pct)) ioPrintln("err=bad_thr_pct");
+    else ioPrintln("ok=thr_pct");
+  }
+  else if (command.startsWith("sense ")) {
+    String v = command.substring(6);
+    v.trim();
+    if (v == "normal") { setOverrideSenseReversed(false); ioPrintln("ok=sense"); }
+    else if (v == "reversed" || v == "reverse") { setOverrideSenseReversed(true); ioPrintln("ok=sense"); }
+    else ioPrintln("err=usage_sense");
+  }
+  else {
+    ioPrintln("err=unknown_safety");
+  }
+}
+
+// ===== Status/Help =====
+void printDetailedStatus() {
+  ioPrintln("=== STATUS ===");
+  ioPrintln("RPM: " + String(currentRPM));
+  ioPrintln("Target RPM: " + String(setpointRPM));
+  ioPrintln("Servo: " + String(servoPosition) + " deg");
+  ioPrintln("Mode: " + modeString());
+  ioPrintln("PID Out: " + String(pidOutput));
+  ioPrintln("PID Dir: " + String(pidDirToString(pidDirectionSetting)));
+  ioPrintln("PID Gains: Kp=" + String(Kp, 4) + " Ki=" + String(Ki, 4) + " Kd=" + String(Kd, 4));
+  ioPrintln("Aggressiveness: " + String(pidAggressiveness, 2));
+  ioPrintln("Pre-PID Start: " + String(pidStartPosition));
+  ioPrintln("PPR: " + String(pulsesPerRevolution));
+  ioPrintln("Sample: " + String(pidSampleTimeMs) + " ms");
+  ioPrintln("Alpha: " + String(rpmFilterAlpha, 2));
+  ioPrintln("Telemetry: " + String(telemetryModeToString(telemetryMode)) + " @ " + String(telemetryIntervalMs) + " ms");
+  ioPrintln("Safety: " + String(overrideEnabled ? "EN" : "DIS") + " thr=" + String(overrideThresholdPct) + "% sense=" +
+            String(overrideSenseReversed ? "REV" : "NOR"));
+  ioPrintln("Pending: " + String(overridePending ? "YES" : "NO") + " | Latched: " + String(overrideLatched ? "YES" : "NO"));
+  ioPrintln(String("dirty=") + (settingsDirty ? "1" : "0"));
+  ioPrintln("================");
+}
+
+void printHelp() {
+  ioPrintln("Commands:");
+  ioPrintln("  getall | get <key>");
+  ioPrintln("  setrpm <rpm>");
+  ioPrintln("  setpid <kp> <ki> <kd>");
+  ioPrintln("  piddir direct|reverse");
+  ioPrintln("  aggressiveness <0.1-3.0>");
+  ioPrintln("  setstart <deg>");
+  ioPrintln("  setsample <10-200>");
+  ioPrintln("  setalpha <0.10-0.50>");
+  ioPrintln("  ppr <1|2|4>");
+  ioPrintln("  telemetry auto|on|off");
+  ioPrintln("  telemetry rate <ms>");
+  ioPrintln("  calibrate ...");
+  ioPrintln("  safety enable|disable");
+  ioPrintln("  safety set_threshold <adc>          (legacy; converts to %)");
+  ioPrintln("  safety set_threshold_pct <0-100>    (recommended)");
+  ioPrintln("  safety sense normal|reversed");
+  ioPrintln("  save | dirty | arm | disarm | status | help");
+}
+
+void printCalibrationStatus() {
+  ioPrintln("=== Calibration Status ===");
+  ioPrintln("Servo Min: " + String(min_position) +
+            " Max: " + String(max_position) +
+            " Neutral: " + String(neutral_position));
+  ioPrintln("Direction: " + String(direction_reversed ? "REVERSED" : "NORMAL"));
+  ioPrintln("Pot Min: " + String(manualPotMin) +
+            " Max: " + String(manualPotMax));
+  ioPrintln("Safety Enabled: " + String(overrideEnabled ? "YES" : "NO"));
+  ioPrintln("Safety Threshold: " + String(overrideThresholdPct) + "% (" +
+            String(overrideSenseReversed ? "SENSE REVERSED" : "SENSE NORMAL") +
+            ") | approx ADC: " + String(pctToAdcForOverride(overrideThresholdPct)));
+  ioPrintln("PID Direction: " + String(pidDirToString(pidDirectionSetting)));
+  ioPrintln("Pre-PID Start Position: " + String(pidStartPosition));
+  ioPrintln("Target RPM (setpoint): " + String(setpointRPM));
+  ioPrintln("PID Gains: Kp=" + String(Kp, 4) + " Ki=" + String(Ki, 4) + " Kd=" + String(Kd, 4));
+  ioPrintln("Aggressiveness: " + String(pidAggressiveness, 2));
+  ioPrintln("PPR: " + String(pulsesPerRevolution));
+  ioPrintln("PID Sample Time: " + String(pidSampleTimeMs) + " ms");
+  ioPrintln("RPM Filter Alpha: " + String(rpmFilterAlpha, 2));
+  ioPrintln("Telemetry: " + String(telemetryModeToString(telemetryMode)) +
+            " @ " + String(telemetryIntervalMs) + " ms");
+  ioPrintln("===========================");
+}
+
+// ===== Preferences =====
+void saveCalibrationData() {
+  preferences.begin("emc_calibration", false);
+
+  preferences.putInt("min_pos", min_position);
+  preferences.putInt("max_pos", max_position);
+  preferences.putInt("neutral_pos", neutral_position);
+  preferences.putBool("direction", direction_reversed);
+
+  preferences.putInt("pot_min", manualPotMin);
+  preferences.putInt("pot_max", manualPotMax);
+
+  // legacy key for backward visibility (stores ADC equivalent), but runtime uses % logic.
+  preferences.putInt("override_thresh", pctToAdcForOverride(overrideThresholdPct));
+  preferences.putBool("override_en", overrideEnabled);
+
+  preferences.putInt("ov_thr_pct", overrideThresholdPct);
+  preferences.putBool("ov_sense_rev", overrideSenseReversed);
+
+  preferences.putInt("ppr", pulsesPerRevolution);
+  preferences.putInt("pid_ts", pidSampleTimeMs);
+  preferences.putInt("rpm_alpha_x100", (int)lround(rpmFilterAlpha * 100.0));
+
+  preferences.putInt("start_pos", pidStartPosition);
+
+  preferences.putDouble("setpoint", setpointRPM);
+  preferences.putDouble("kp", Kp);
+  preferences.putDouble("ki", Ki);
+  preferences.putDouble("kd", Kd);
+  preferences.putDouble("aggr", pidAggressiveness);
+
+  preferences.putInt("pid_dir", (int)pidDirectionSetting);
+
+  preferences.putInt("tele_mode", (int)telemetryMode);
+  preferences.putInt("tele_ms", (int)telemetryIntervalMs);
+
+  preferences.end();
+  ioPrintln("Saved ALL settings to NVS.");
+}
+
+void loadCalibrationData() {
+  preferences.begin("emc_calibration", false);
+
+  min_position = preferences.getInt("min_pos", 0);
+  max_position = preferences.getInt("max_pos", 180);
+  neutral_position = preferences.getInt("neutral_pos", 90);
+  direction_reversed = preferences.getBool("direction", false);
+
+  manualPotMin = preferences.getInt("pot_min", 0);
+  manualPotMax = preferences.getInt("pot_max", 4095);
+  if (manualPotMin >= manualPotMax) manualPotMin = 0;
+
+  overrideEnabled = preferences.getBool("override_en", false);
+
+  overrideSenseReversed = preferences.getBool("ov_sense_rev", false);
+
+  int loadedPct = preferences.getInt("ov_thr_pct", -1);
+  if (loadedPct >= 0 && loadedPct <= 100) {
+    overrideThresholdPct = loadedPct;
+  } else {
+    int legacyAdc = preferences.getInt("override_thresh", (int)(manualPotMax * 0.85));
+    legacyAdc = constrain(legacyAdc, manualPotMin, manualPotMax);
+    overrideThresholdPct = adcToPctForOverride(legacyAdc);
+  }
+
+  int loadedPPR = preferences.getInt("ppr", 1);
+  pulsesPerRevolution = (loadedPPR == 1 || loadedPPR == 2 || loadedPPR == 4) ? loadedPPR : 1;
+
+  int loadedTs = preferences.getInt("pid_ts", 100);
+  pidSampleTimeMs = constrain(loadedTs, 10, 200);
+
+  int alphaX100 = preferences.getInt("rpm_alpha_x100", 30);
+  double loadedAlpha = alphaX100 / 100.0;
+  rpmFilterAlpha = constrain(loadedAlpha, 0.10, 0.50);
+
+  pidStartPosition = preferences.getInt("start_pos", pidStartPosition);
+  pidStartPosition = constrain(pidStartPosition, min_position, max_position);
+
+  double loadedSetpoint = preferences.getDouble("setpoint", setpointRPM);
+  if (loadedSetpoint > 0 && loadedSetpoint <= 100000) setpointRPM = loadedSetpoint;
+
+  double loadedKp = preferences.getDouble("kp", Kp);
+  double loadedKi = preferences.getDouble("ki", Ki);
+  double loadedKd = preferences.getDouble("kd", Kd);
+  if (loadedKp >= 0) Kp = loadedKp;
+  if (loadedKi >= 0) Ki = loadedKi;
+  if (loadedKd >= 0) Kd = loadedKd;
+
+  double loadedAggr = preferences.getDouble("aggr", pidAggressiveness);
+  if (loadedAggr >= 0.1 && loadedAggr <= 3.0) pidAggressiveness = loadedAggr;
+
+  int loadedPidDir = preferences.getInt("pid_dir", (int)PID_DIR_DIRECT);
+  if (loadedPidDir != (int)PID_DIR_DIRECT && loadedPidDir != (int)PID_DIR_REVERSE) loadedPidDir = (int)PID_DIR_DIRECT;
+  pidDirectionSetting = (PidDirectionSetting)loadedPidDir;
+
+  int loadedTeleMode = preferences.getInt("tele_mode", (int)TELE_AUTO);
+  if (loadedTeleMode < 0 || loadedTeleMode > 2) loadedTeleMode = (int)TELE_AUTO;
+  telemetryMode = (TelemetryMode)loadedTeleMode;
+
+  int loadedTeleMs = preferences.getInt("tele_ms", 500);
+  if (loadedTeleMs < (int)telemetryRateMinMs) loadedTeleMs = telemetryRateMinMs;
+  if (loadedTeleMs > (int)telemetryRateMaxMs) loadedTeleMs = telemetryRateMaxMs;
+  telemetryIntervalMs = (unsigned long)loadedTeleMs;
+
+  preferences.end();
+  Serial.println("Calibration/settings loaded from NVS.");
+}
+
 
