@@ -1,0 +1,304 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EMC BLE GUI</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .card { border: 1px solid #ccc; border-radius: 10px; padding: 12px; min-width: 280px; }
+    .card h3 { margin: 0 0 10px 0; font-size: 16px; }
+    label { display: block; font-size: 12px; opacity: 0.8; margin-top: 8px; }
+    input, select, button { font-size: 14px; padding: 8px; }
+    input, select { width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; }
+    #log { width: 100%; height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px; font-family: ui-monospace, monospace; }
+    .kv div { padding: 2px 0; }
+    .good { color: #0a7; } .bad { color: #c22; }
+  </style>
+</head>
+<body>
+  <h2>EMC BLE GUI</h2>
+  <div class="row">
+    <div class="card">
+      <h3>Connection</h3>
+      <button id="btnConnect">Connect</button>
+      <button id="btnDisconnect" disabled>Disconnect</button>
+      <div style="margin-top:10px;">
+        <div>Status: <span id="connStatus" class="bad">disconnected</span></div>
+        <div>Device: <span id="devName">—</span></div>
+      </div>
+      <div style="margin-top:12px;">
+        <button id="btnGetAll" disabled>Get All</button>
+        <button id="btnSave" disabled>Save</button>
+        <button id="btnArm" disabled>Arm</button>
+        <button id="btnDisarm" disabled>Disarm</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Live Readouts</h3>
+      <div class="kv">
+        <div>rpm</div><div id="v_rpm">—</div>
+        <div>target</div><div id="v_target">—</div>
+        <div>servo</div><div id="v_servo">—</div>
+        <div>mode</div><div id="v_mode">—</div>
+        <div>dirty</div><div id="v_dirty">—</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>PID</h3>
+      <label>Target RPM</label>
+      <input id="inSetRpm" type="number" step="1" />
+      <button id="btnSetRpm" disabled>Send setrpm</button>
+
+      <label>Kp Ki Kd</label>
+      <div class="row" style="gap:8px;">
+        <input id="inKp" type="number" step="0.01" placeholder="Kp" />
+        <input id="inKi" type="number" step="0.01" placeholder="Ki" />
+        <input id="inKd" type="number" step="0.01" placeholder="Kd" />
+      </div>
+      <button id="btnSetPid" disabled>Send setpid</button>
+
+      <label>PID Direction</label>
+      <select id="selPidDir">
+        <option value="direct">DIRECT</option>
+        <option value="reverse">REVERSE</option>
+      </select>
+      <button id="btnPidDir" disabled>Send piddir</button>
+
+      <label>Aggressiveness (0.1–3.0)</label>
+      <input id="inAggr" type="number" step="0.1" />
+      <button id="btnAggr" disabled>Send aggressiveness</button>
+    </div>
+
+    <div class="card">
+      <h3>Timing & RPM</h3>
+      <label>PPR</label>
+      <select id="selPpr">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+      </select>
+      <button id="btnPpr" disabled>Send ppr</button>
+
+      <label>Sample time (ms 10–200)</label>
+      <input id="inSample" type="number" step="1" />
+      <button id="btnSample" disabled>Send setsample</button>
+
+      <label>RPM Filter Alpha (0.10–0.50)</label>
+      <input id="inAlpha" type="number" step="0.01" />
+      <button id="btnAlpha" disabled>Send setalpha</button>
+
+      <label>Pre-PID start position (deg)</label>
+      <input id="inStart" type="number" step="1" />
+      <button id="btnStart" disabled>Send setstart</button>
+    </div>
+
+    <div class="card">
+      <h3>Telemetry</h3>
+      <label>Mode</label>
+      <select id="selTeleMode">
+        <option value="auto">AUTO</option>
+        <option value="on">ON</option>
+        <option value="off">OFF</option>
+      </select>
+      <button id="btnTeleMode" disabled>Send telemetry mode</button>
+
+      <label>Rate (ms 50–5000)</label>
+      <input id="inTeleMs" type="number" step="10" />
+      <button id="btnTeleRate" disabled>Send telemetry rate</button>
+    </div>
+
+    <div class="card">
+      <h3>Safety Override</h3>
+      <label>Enable/Disable</label>
+      <div class="row" style="gap:8px;">
+        <button id="btnSafetyEn" disabled>Enable</button>
+        <button id="btnSafetyDis" disabled>Disable</button>
+      </div>
+
+      <label>Threshold (% 0–100)</label>
+      <input id="inThrPct" type="number" step="1" />
+      <button id="btnThrPct" disabled>Send threshold %</button>
+
+      <label>Sense</label>
+      <select id="selSense">
+        <option value="normal">NORMAL</option>
+        <option value="reversed">REVERSED</option>
+      </select>
+      <button id="btnSense" disabled>Send sense</button>
+    </div>
+  </div>
+
+  <h3>Log</h3>
+  <textarea id="log" readonly></textarea>
+
+<script>
+  // Nordic UART Service UUIDs
+  const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+  const NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // write
+  const NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // notify
+
+  let device = null;
+  let server = null;
+  let rxChar = null;
+  let txChar = null;
+
+  const $ = (id) => document.getElementById(id);
+
+  function logLine(s) {
+    $("log").value += s + "\n";
+    $("log").scrollTop = $("log").scrollHeight;
+  }
+
+  function setConnected(yes) {
+    $("btnDisconnect").disabled = !yes;
+    $("btnConnect").disabled = yes;
+
+    const enable = (id) => $(id).disabled = !yes;
+    ["btnGetAll","btnSave","btnArm","btnDisarm",
+     "btnSetRpm","btnSetPid","btnPidDir","btnAggr",
+     "btnPpr","btnSample","btnAlpha","btnStart",
+     "btnTeleMode","btnTeleRate",
+     "btnSafetyEn","btnSafetyDis","btnThrPct","btnSense"
+    ].forEach(enable);
+
+    $("connStatus").textContent = yes ? "connected" : "disconnected";
+    $("connStatus").className = yes ? "good" : "bad";
+  }
+
+  function applyKV(k, v) {
+    const map = {
+      rpm: "v_rpm",
+      target: "v_target",
+      servo: "v_servo",
+      mode: "v_mode",
+      dirty: "v_dirty",
+    };
+    if (map[k]) $(map[k]).textContent = v;
+
+    // also populate inputs when getall arrives
+    if (k === "target") $("inSetRpm").value = v;
+    if (k === "kp") $("inKp").value = v;
+    if (k === "ki") $("inKi").value = v;
+    if (k === "kd") $("inKd").value = v;
+    if (k === "aggr") $("inAggr").value = v;
+    if (k === "ppr") $("selPpr").value = v;
+    if (k === "ts") $("inSample").value = v;
+    if (k === "alpha") $("inAlpha").value = v;
+    if (k === "ov_thr_pct") $("inThrPct").value = v;
+    if (k === "ov_sense") $("selSense").value = (v === "1") ? "reversed" : "normal";
+    if (k === "pid_dir") $("selPidDir").value = (String(v).toLowerCase().includes("rev")) ? "reverse" : "direct";
+    if (k === "tele_mode") $("selTeleMode").value = String(v).toLowerCase();
+    if (k === "tele_ms") $("inTeleMs").value = v;
+  }
+
+  function parseLine(line) {
+    line = line.trim();
+    if (!line) return;
+
+    // "tele k=v k=v ... end"
+    if (line.startsWith("tele ")) {
+      const parts = line.substring(5).split(/\s+/);
+      for (const p of parts) {
+        if (p === "end") break;
+        const i = p.indexOf("=");
+        if (i > 0) applyKV(p.substring(0,i), p.substring(i+1));
+      }
+      return;
+    }
+
+    // single key=value lines (getall)
+    const i = line.indexOf("=");
+    if (i > 0) {
+      applyKV(line.substring(0,i), line.substring(i+1));
+      return;
+    }
+
+    logLine(line);
+  }
+
+  async function connect() {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [NUS_SERVICE] }],
+      optionalServices: [NUS_SERVICE]
+    });
+
+    $("devName").textContent = device.name || "(unnamed)";
+    device.addEventListener("gattserverdisconnected", () => {
+      logLine("[BLE] disconnected");
+      setConnected(false);
+    });
+
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS_SERVICE);
+
+    rxChar = await svc.getCharacteristic(NUS_RX);
+    txChar = await svc.getCharacteristic(NUS_TX);
+
+    await txChar.startNotifications();
+    txChar.addEventListener("characteristicvaluechanged", (ev) => {
+      const v = ev.target.value;
+      const text = new TextDecoder().decode(v);
+      // can contain partials; split by newline
+      for (const line of text.split(/\r?\n/)) parseLine(line);
+    });
+
+    setConnected(true);
+    logLine("[BLE] connected");
+    await sendCmd("getall");
+  }
+
+  async function disconnect() {
+    if (device && device.gatt.connected) device.gatt.disconnect();
+    setConnected(false);
+  }
+
+  async function sendCmd(cmd) {
+    if (!rxChar) return;
+    const enc = new TextEncoder();
+    const data = enc.encode(cmd + "\n");
+    // writeWithoutResponse is typically better for UART
+    if (rxChar.properties.writeWithoutResponse) {
+      await rxChar.writeValueWithoutResponse(data);
+    } else {
+      await rxChar.writeValue(data);
+    }
+    logLine(">> " + cmd);
+  }
+
+  $("btnConnect").onclick = connect;
+  $("btnDisconnect").onclick = disconnect;
+
+  $("btnGetAll").onclick = () => sendCmd("getall");
+  $("btnSave").onclick = () => sendCmd("save");
+  $("btnArm").onclick = () => sendCmd("arm");
+  $("btnDisarm").onclick = () => sendCmd("disarm");
+
+  $("btnSetRpm").onclick = () => sendCmd(`setrpm ${$("inSetRpm").value}`);
+  $("btnSetPid").onclick = () => sendCmd(`setpid ${$("inKp").value} ${$("inKi").value} ${$("inKd").value}`);
+  $("btnPidDir").onclick = () => sendCmd(`piddir ${$("selPidDir").value}`);
+  $("btnAggr").onclick = () => sendCmd(`aggressiveness ${$("inAggr").value}`);
+
+  $("btnPpr").onclick = () => sendCmd(`ppr ${$("selPpr").value}`);
+  $("btnSample").onclick = () => sendCmd(`setsample ${$("inSample").value}`);
+  $("btnAlpha").onclick = () => sendCmd(`setalpha ${$("inAlpha").value}`);
+  $("btnStart").onclick = () => sendCmd(`setstart ${$("inStart").value}`);
+
+  $("btnTeleMode").onclick = () => sendCmd(`telemetry ${$("selTeleMode").value}`);
+  $("btnTeleRate").onclick = () => sendCmd(`telemetry rate ${$("inTeleMs").value}`);
+
+  $("btnSafetyEn").onclick = () => sendCmd("safety enable");
+  $("btnSafetyDis").onclick = () => sendCmd("safety disable");
+  $("btnThrPct").onclick = () => sendCmd(`safety set_threshold_pct ${$("inThrPct").value}`);
+  $("btnSense").onclick = () => sendCmd(`safety sense ${$("selSense").value}`);
+
+  setConnected(false);
+</script>
+</body>
+</html>
+
