@@ -7,18 +7,15 @@
 
 // ===== EMC Type 1 Controller for ESP32 (UNO LED VERSION) =====
 // BLE-ONLY + Web GUI protocol compatible (NUS UART)
-// Standardized:
-//  - BLE UART UUIDs (Nordic UART Service)
-//  - getall / get <key>
-//  - telemetry line: "tele key=value ... end"
-//  - safety: threshold in % + optional sense reverse (legacy adc setter still supported)
+// NimBLE-Arduino Universal Compatible
+// FINAL VERSION - Telemetry optimized for live feed
 
 // ===== Pin Definitions =====
 const int rpmSensorPin      = 19;
 const int potentiometerPin  = 34;
 const int manualPotPin      = 35;
 const int servoPin          = 18;
-const int armLightPin       = 2;    // LED annunciation pin
+const int armLightPin       = 2;
 const int armSwitchPin      = 21;
 
 // ===== Preferences =====
@@ -32,8 +29,6 @@ int min_position = 0;
 int max_position = 180;
 int neutral_position = 90;
 bool direction_reversed = false;
-
-// Pre-PID start position (for arming sequence) — persisted
 int pidStartPosition = 50;
 
 // Manual potentiometer calibration
@@ -41,17 +36,17 @@ int manualPotMin = 0;
 int manualPotMax = 4095;
 
 // ===== RPM (period-based) =====
-int pulsesPerRevolution = 1; // persisted
+int pulsesPerRevolution = 1;
 
-volatile unsigned long lastPulseMicros   = 0;     // last ACCEPTED pulse time
-volatile unsigned long pulsePeriodMicros = 0;     // most recent ACCEPTED period
+volatile unsigned long lastPulseMicros   = 0;
+volatile unsigned long pulsePeriodMicros = 0;
 volatile bool newPeriodAvailable         = false;
 volatile unsigned long pulseCount        = 0;
 
-const unsigned long minPulsePeriodMicros = 200;    // reject absurdly fast edges (noise)
-const unsigned long rpmTimeoutMicros     = 300000; // if no accepted pulse for 0.30s -> RPM = 0
+const unsigned long minPulsePeriodMicros = 200;
+const unsigned long rpmTimeoutMicros     = 300000;
 
-double rpmFilterAlpha = 0.30; // persisted
+double rpmFilterAlpha = 0.30;
 
 // ===== Sensor readings =====
 int potValue = 0;
@@ -67,15 +62,12 @@ const unsigned long ledFlashInterval = 500;
 const unsigned long ledFlashIntervalOverride = 250;
 bool ledState = false;
 
-// ===== Safety override (2-stage + latched annunciation) =====
+// ===== Safety override =====
 bool overrideEnabled = false;
 bool overridePending = false;
 bool overrideLatched = false;
-
-// Override threshold is % of calibrated travel + optional sense reverse (persisted)
-int  overrideThresholdPct = 85;      // 0–100, persisted
-bool overrideSenseReversed = false;  // persisted
-
+int  overrideThresholdPct = 85;
+bool overrideSenseReversed = false;
 bool armSwitchPreviousState = false;
 
 // ===== PID control =====
@@ -83,20 +75,28 @@ double setpointRPM = 1000.0;
 double currentRPM  = 0.0;
 double pidOutput   = 0.0;
 double Kp = 2.0, Ki = 5.0, Kd = 1.0;
+double pidAggressiveness = 1.0;
+int pidSampleTimeMs = 100;
 
-double pidAggressiveness = 1.0; // 0.1–3.0
-int pidSampleTimeMs = 100;      // 10–200 ms, persisted
-
-// ===== PID Direction (Persisted) =====
+// ===== PID Direction =====
 enum PidDirectionSetting : int {
   PID_DIR_DIRECT  = 0,
   PID_DIR_REVERSE = 1
 };
-PidDirectionSetting pidDirectionSetting = PID_DIR_DIRECT; // persisted
+PidDirectionSetting pidDirectionSetting = PID_DIR_DIRECT;
 
-static const char* pidDirToString(PidDirectionSetting d) {
-  return (d == PID_DIR_REVERSE) ? "REVERSE" : "DIRECT";
-}
+// ===== Telemetry =====
+enum TelemetryMode : int {
+  TELE_AUTO = 0,
+  TELE_ON   = 1,
+  TELE_OFF  = 2
+};
+TelemetryMode telemetryMode = TELE_AUTO;
+bool telemetryEnabled = false;
+unsigned long telemetryIntervalMs = 500;
+unsigned long lastTelemetryTime = 0;
+const unsigned long telemetryRateMinMs = 50;
+const unsigned long telemetryRateMaxMs = 5000;
 
 // ===== Servo =====
 Servo clutchServo;
@@ -105,21 +105,51 @@ int servoPosition = 90;
 // ===== PID =====
 PID myPID(&currentRPM, &pidOutput, &setpointRPM, Kp, Ki, Kd, DIRECT);
 
-// ===== Telemetry Control (Persisted) =====
-enum TelemetryMode : int {
-  TELE_AUTO = 0,
-  TELE_ON   = 1,
-  TELE_OFF  = 2
-};
-TelemetryMode telemetryMode = TELE_AUTO;   // persisted
-bool telemetryEnabled = false;             // derived runtime from telemetryMode + armed
-unsigned long telemetryIntervalMs = 500;   // persisted stream rate (ms)
-unsigned long lastTelemetryTime = 0;
+// ===== BLE UART =====
+static const char* BLE_NAME = "EMC_UNO";
+static NimBLEUUID NUS_SERVICE("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+static NimBLEUUID NUS_RX     ("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+static NimBLEUUID NUS_TX     ("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
+static NimBLECharacteristic* txChar = nullptr;
+static bool bleConnected = false;
+static bool bleNotificationsEnabled = false;
+static String bleRxBuf;
 
-const unsigned long telemetryRateMinMs = 50;
-const unsigned long telemetryRateMaxMs = 5000;
+// ===== Optional serial input =====
+String inputString = "";
+bool stringComplete = false;
 
-static const char* telemetryModeToString(TelemetryMode m) {
+// ===== FUNCTION DECLARATIONS =====
+void IRAM_ATTR rpmPulseISR();
+void readSensors();
+void processInput();
+void processCommand(String command);
+void updateSystemState();
+bool attemptArm();
+bool attemptArmFromSwitch();
+void disarmSystem(const String &reason);
+void runPIDControl();
+void runManualControl();
+void updateOutputs();
+int applyCalibration(int position);
+void processCalibrationCommand(String command);
+void processSafetyCommand(String command);
+void printDetailedStatus();
+void printHelp();
+void printCalibrationStatus();
+void saveCalibrationData();
+void loadCalibrationData();
+void emitGetAll();
+bool emitGetKey(const String& key);
+void emitTelemetryKvLine();
+
+// ===== HELPER FUNCTIONS =====
+
+const char* pidDirToString(PidDirectionSetting d) {
+  return (d == PID_DIR_REVERSE) ? "REVERSE" : "DIRECT";
+}
+
+const char* telemetryModeToString(TelemetryMode m) {
   switch (m) {
     case TELE_AUTO: return "AUTO";
     case TELE_ON:   return "ON";
@@ -131,18 +161,15 @@ static const char* telemetryModeToString(TelemetryMode m) {
 void applyTelemetryPolicy() {
   if (telemetryMode == TELE_ON) telemetryEnabled = true;
   else if (telemetryMode == TELE_OFF) telemetryEnabled = false;
-  else telemetryEnabled = systemArmed; // AUTO
+  else telemetryEnabled = systemArmed;
 }
 
-// ===== Override normalization helpers =====
 double getManualPotNormForOverride(int rawAdc) {
   const int span = manualPotMax - manualPotMin;
   if (span <= 0) return 0.0;
-
   double norm = ((double)rawAdc - (double)manualPotMin) / (double)span;
   if (norm < 0.0) norm = 0.0;
   if (norm > 1.0) norm = 1.0;
-
   if (overrideSenseReversed) norm = 1.0 - norm;
   return norm;
 }
@@ -155,13 +182,10 @@ int adcToPctForOverride(int adc) {
 
 int pctToAdcForOverride(int pct) {
   pct = constrain(pct, 0, 100);
-
   const int span = manualPotMax - manualPotMin;
   if (span <= 0) return manualPotMin;
-
   double norm = (double)pct / 100.0;
   if (overrideSenseReversed) norm = 1.0 - norm;
-
   int adc = (int)lround((double)manualPotMin + norm * (double)span);
   return constrain(adc, manualPotMin, manualPotMax);
 }
@@ -191,7 +215,6 @@ bool setOverrideSenseReversed(bool reversed) {
   return true;
 }
 
-// Legacy setter: accepts ADC threshold but converts to coherent % under current calibration/sense
 bool setOverrideThresholdAdcLegacy(int adc) {
   adc = constrain(adc, manualPotMin, manualPotMax);
   int pct = adcToPctForOverride(adc);
@@ -202,57 +225,48 @@ bool setOverrideThresholdAdcLegacy(int adc) {
   return true;
 }
 
-// ===== PID direction setter =====
 bool setPidDirectionSetting(PidDirectionSetting d) {
   if (d != PID_DIR_DIRECT && d != PID_DIR_REVERSE) return false;
-
   if (systemArmed) {
     Serial.println("PID DIRECTION CHANGE REJECTED: system is ARMED. Disarm first.");
     return false;
   }
-
   if (pidDirectionSetting == d) {
     Serial.println("PID direction unchanged (" + String(pidDirToString(pidDirectionSetting)) + ")");
     return true;
   }
-
   pidDirectionSetting = d;
   myPID.SetControllerDirection((pidDirectionSetting == PID_DIR_REVERSE) ? REVERSE : DIRECT);
-
   settingsDirty = true;
   Serial.println("PID direction set to: " + String(pidDirToString(pidDirectionSetting)) + " | (UNSAVED)");
   return true;
 }
 
-// ===== BLE UART (NUS) =====
-static const char* BLE_NAME = "EMC_UNO";
-
-// Nordic UART Service
-static NimBLEUUID NUS_SERVICE("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-static NimBLEUUID NUS_RX     ("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // write
-static NimBLEUUID NUS_TX     ("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"); // notify
-
-static NimBLECharacteristic* txChar = nullptr;
-static bool bleConnected = false;
-
-static String bleRxBuf;
+// ===== BLE Functions (SIMPLIFIED - MAXIMUM COMPATIBILITY) =====
 
 void bleSend(const String& s) {
-  if (!bleConnected || !txChar) return;
-
-  // chunk to be safe with notifications
-  const int CHUNK = 180;
-  int i = 0;
-  while (i < (int)s.length()) {
-    String part = s.substring(i, i + CHUNK);
-    txChar->setValue(part.c_str());
-    txChar->notify();
-    i += CHUNK;
-    delay(2);
+  if (!bleConnected || !txChar) {
+    Serial.println("[BLE TX] ERROR: Not connected");
+    return;
   }
+  
+  Serial.print("[BLE TX] Sending (" + String(s.length()) + " bytes): ");
+  if (s.length() < 100) {
+    Serial.println(s);
+  } else {
+    Serial.println(s.substring(0, 100) + "...");
+  }
+  
+  // Simple, direct send - just notify
+  txChar->setValue(s.c_str());
+  txChar->notify();
+  
+  delay(20);  // Small delay to let it transmit
 }
 
-void bleSendLine(const String& s) { bleSend(s + "\n"); }
+void bleSendLine(const String& s) { 
+  bleSend(s + "\n"); 
+}
 
 void ioPrintln(const String& s) {
   Serial.println(s);
@@ -264,132 +278,232 @@ void ioPrint(const String& s) {
   if (bleConnected) bleSend(s);
 }
 
+// ===== BLE Callbacks =====
+
 class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer*) override {
+  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) {
     bleConnected = true;
-    Serial.println("[BLE] connected");
+    Serial.println("\n[BLE] ========================================");
+    Serial.println("[BLE] ===== CLIENT CONNECTED =====");
+    Serial.println("[BLE] Address: " + String(connInfo.getAddress().toString().c_str()));
+    Serial.println("[BLE] Connection ID: " + String(connInfo.getConnHandle()));
+    Serial.println("[BLE] MTU: " + String(connInfo.getMTU()));
+    Serial.println("[BLE] ========================================\n");
   }
-  void onDisconnect(NimBLEServer* server) override {
+  
+  void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) {
     bleConnected = false;
-    Serial.println("[BLE] disconnected");
-    server->startAdvertising();
+    bleNotificationsEnabled = false;
+    Serial.println("\n[BLE] ========================================");
+    Serial.println("[BLE] ===== CLIENT DISCONNECTED =====");
+    Serial.println("[BLE] Reason code: " + String(reason));
+    Serial.println("[BLE] Address: " + String(connInfo.getAddress().toString().c_str()));
+    Serial.println("[BLE] Re-advertising...");
+    Serial.println("[BLE] ========================================\n");
+    
+    NimBLEDevice::startAdvertising();
+  }
+  
+  void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) {
+    Serial.println("[BLE] MTU updated to: " + String(MTU));
   }
 };
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c) override {
-    std::string v = c->getValue();
+  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
+    std::string v = pCharacteristic->getValue();
     if (v.empty()) return;
-
+    
+    Serial.println("[BLE RX] Received: '" + String(v.c_str()) + "'");
+    
     for (char ch : v) {
       if (ch == '\r') continue;
       if (ch == '\n') {
         String line = bleRxBuf;
         bleRxBuf = "";
         line.trim();
-        if (line.length()) processCommand(line);
+        
+        if (line.length()) {
+          Serial.println(">> " + line);
+          processCommand(line);
+        }
       } else {
-        if (bleRxBuf.length() < 240) bleRxBuf += ch; // prevent runaway
+        if (bleRxBuf.length() < 240) bleRxBuf += ch;
       }
+    }
+  }
+  
+  void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
+    Serial.println("[BLE RX] Client read RX characteristic");
+  }
+  
+  void onStatus(NimBLECharacteristic* pCharacteristic, int code) {
+    if (code != 0) {
+      Serial.println("[BLE RX] Status code: " + String(code));
+    }
+  }
+};
+
+class TxCallbacks : public NimBLECharacteristicCallbacks {
+  void onSubscribe(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo, uint16_t subValue) {
+    Serial.println("\n[BLE TX] ===== SUBSCRIPTION EVENT =====");
+    Serial.println("[BLE TX] Client: " + String(connInfo.getAddress().toString().c_str()));
+    
+    if (subValue == 0) {
+      Serial.println("[BLE TX] ❌ Client UNSUBSCRIBED from notifications");
+      bleNotificationsEnabled = false;
+    } else if (subValue == 1) {
+      Serial.println("[BLE TX] ✅ Client SUBSCRIBED to NOTIFICATIONS");
+      bleNotificationsEnabled = true;
+    } else if (subValue == 2) {
+      Serial.println("[BLE TX] ✅ Client SUBSCRIBED to INDICATIONS");
+      bleNotificationsEnabled = true;
+    } else if (subValue == 3) {
+      Serial.println("[BLE TX] ✅ Client SUBSCRIBED to BOTH");
+      bleNotificationsEnabled = true;
+    }
+    
+    Serial.println("[BLE TX] Data transmission: " + String(bleNotificationsEnabled ? "ENABLED" : "DISABLED"));
+    Serial.println("[BLE TX] ===================================\n");
+  }
+  
+  void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
+    Serial.println("[BLE TX] Client read TX characteristic");
+  }
+  
+  void onStatus(NimBLECharacteristic* pCharacteristic, int code) {
+    if (code != 0) {
+      Serial.println("[BLE TX] Status code: " + String(code));
     }
   }
 };
 
 void bleInit() {
+  Serial.println("[BLE] ========================================");
+  Serial.println("[BLE] Initializing NimBLE stack...");
+  Serial.println("[BLE] ========================================");
+  
   NimBLEDevice::init(BLE_NAME);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-
+  
+  Serial.println("[BLE] Creating BLE server...");
   NimBLEServer* server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
-
+  
+  Serial.println("[BLE] Creating Nordic UART Service (NUS)...");
   NimBLEService* svc = server->createService(NUS_SERVICE);
-
-  txChar = svc->createCharacteristic(NUS_TX, NIMBLE_PROPERTY::NOTIFY);
-  NimBLECharacteristic* rx = svc->createCharacteristic(NUS_RX, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  
+  // TX Characteristic - READ + NOTIFY + INDICATE for maximum compatibility
+  Serial.println("[BLE] Creating TX characteristic...");
+  Serial.println("[BLE] Properties: READ + NOTIFY + INDICATE");
+  txChar = svc->createCharacteristic(
+    NUS_TX, 
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::INDICATE
+  );
+  
+  // Set initial empty value
+  txChar->setValue("");
+  
+  // Add CCCD descriptor for notifications/indications
+  Serial.println("[BLE] Adding CCCD descriptor (0x2902)...");
+  NimBLEDescriptor* txDesc = txChar->createDescriptor(
+    NimBLEUUID((uint16_t)0x2902),
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
+  );
+  
+  // Pre-enable notifications by default (helps with some GUIs)
+  uint8_t descVal[2] = {0x01, 0x00};  // 0x0001 = notifications enabled
+  txDesc->setValue(descVal, 2);
+  Serial.println("[BLE] CCCD pre-configured: notifications ENABLED by default");
+  
+  // Add callbacks to TX characteristic
+  txChar->setCallbacks(new TxCallbacks());
+  
+  // Assume notifications are enabled (force it)
+  bleNotificationsEnabled = true;
+  
+  // RX Characteristic
+  Serial.println("[BLE] Creating RX characteristic...");
+  Serial.println("[BLE] Properties: WRITE + WRITE_NO_RESPONSE");
+  NimBLECharacteristic* rx = svc->createCharacteristic(
+    NUS_RX, 
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
   rx->setCallbacks(new RxCallbacks());
-
+  
+  Serial.println("[BLE] Starting BLE service...");
   svc->start();
-
+  
+  Serial.println("[BLE] Configuring advertising...");
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(NUS_SERVICE);
-  adv->setScanResponse(true);
+  adv->setMinInterval(100);
+  adv->setMaxInterval(200);
+  
+  Serial.println("[BLE] Starting advertising...");
   adv->start();
-
-  Serial.println("[BLE] advertising as " + String(BLE_NAME));
-}
-
-// ===== Forward Decls =====
-void IRAM_ATTR rpmPulseISR();
-void readSensors();
-void processInput(); // serial only (optional)
-void processCommand(String command);
-void updateSystemState();
-bool attemptArm();
-bool attemptArmFromSwitch();
-void disarmSystem(const String &reason);
-void runPIDControl();
-void runManualControl();
-void updateOutputs();
-int applyCalibration(int position);
-
-void processCalibrationCommand(String command);
-void processSafetyCommand(String command);
-
-void printStatusVerbose();
-void printDetailedStatus();
-void printHelp();
-void printCalibrationStatus();
-
-void saveCalibrationData();
-void loadCalibrationData();
-
-// ===== Optional serial input =====
-String inputString = "";
-bool stringComplete = false;
-
-void processInput() {
-  while (Serial.available()) {
-    char inChar = (char)Serial.read();
-    if (inChar == '\n') stringComplete = true;
-    else inputString += inChar;
-  }
-  if (stringComplete) {
-    inputString.trim();
-    if (inputString.length()) processCommand(inputString);
-    inputString = "";
-    stringComplete = false;
-  }
+  
+  Serial.println("\n[BLE] ========================================");
+  Serial.println("[BLE] ✅✅✅ BLE INITIALIZED SUCCESSFULLY ✅✅✅");
+  Serial.println("[BLE] ========================================");
+  Serial.println("[BLE] Device Name: " + String(BLE_NAME));
+  Serial.println("[BLE] Service UUID: " + String(NUS_SERVICE.toString().c_str()));
+  Serial.println("[BLE] TX UUID: " + String(NUS_TX.toString().c_str()));
+  Serial.println("[BLE] RX UUID: " + String(NUS_RX.toString().c_str()));
+  Serial.println("[BLE] TX Properties: READ + NOTIFY + INDICATE");
+  Serial.println("[BLE] Notifications: PRE-ENABLED");
+  Serial.println("[BLE] Status: ADVERTISING and READY");
+  Serial.println("[BLE] ========================================\n");
+  
+  delay(100);
 }
 
 // ===== Protocol helpers =====
+
 String kv(const char* k, const String& v) { return String(k) + "=" + v; }
 String kv(const char* k, double v, int dp=2) { return String(k) + "=" + String(v, dp); }
 String kv(const char* k, int v) { return String(k) + "=" + String(v); }
-
 String modeString() { return systemArmed ? "AUTO" : "MANUAL"; }
 
 void emitGetAll() {
-  ioPrintln(kv("rpm", (int)lround(currentRPM)));
-  ioPrintln(kv("target", (int)lround(setpointRPM)));
-  ioPrintln(kv("servo", servoPosition));
-  ioPrintln(kv("mode", modeString()));
-  ioPrintln(kv("kp", String(Kp, 6)));
-  ioPrintln(kv("ki", String(Ki, 6)));
-  ioPrintln(kv("kd", String(Kd, 6)));
-  ioPrintln(kv("aggr", String(pidAggressiveness, 3)));
-  ioPrintln(kv("ppr", pulsesPerRevolution));
-  ioPrintln(kv("ts", pidSampleTimeMs));
-  ioPrintln(kv("alpha", String(rpmFilterAlpha, 3)));
-  ioPrintln(kv("pid_dir", pidDirToString(pidDirectionSetting)));
-  ioPrintln(kv("tele_mode", telemetryModeToString(telemetryMode)));
-  ioPrintln(kv("tele_ms", (int)telemetryIntervalMs));
-  ioPrintln(kv("override_en", overrideEnabled ? 1 : 0));
-  ioPrintln(kv("ov_thr_pct", overrideThresholdPct));
-  ioPrintln(kv("ov_sense", overrideSenseReversed ? 1 : 0));
-  ioPrintln(kv("pending", overridePending ? 1 : 0));
-  ioPrintln(kv("latched", overrideLatched ? 1 : 0));
-  ioPrintln(kv("dirty", settingsDirty ? 1 : 0));
-  ioPrintln("end");
+  Serial.println("[CMD] Executing getall...");
+  
+  // Build ONE big string with all data
+  String allData = "";
+  allData += kv("rpm", (int)lround(currentRPM)) + "\n";
+  allData += kv("target", (int)lround(setpointRPM)) + "\n";
+  allData += kv("servo", servoPosition) + "\n";
+  allData += kv("mode", modeString()) + "\n";
+  allData += kv("kp", String(Kp, 6)) + "\n";
+  allData += kv("ki", String(Ki, 6)) + "\n";
+  allData += kv("kd", String(Kd, 6)) + "\n";
+  allData += kv("aggr", String(pidAggressiveness, 3)) + "\n";
+  allData += kv("ppr", pulsesPerRevolution) + "\n";
+  allData += kv("ts", pidSampleTimeMs) + "\n";
+  allData += kv("alpha", String(rpmFilterAlpha, 3)) + "\n";
+  allData += kv("pid_dir", pidDirToString(pidDirectionSetting)) + "\n";
+  allData += kv("tele_mode", telemetryModeToString(telemetryMode)) + "\n";
+  allData += kv("tele_ms", (int)telemetryIntervalMs) + "\n";
+  allData += kv("override_en", overrideEnabled ? 1 : 0) + "\n";
+  allData += kv("ov_thr_pct", overrideThresholdPct) + "\n";
+  allData += kv("ov_sense", overrideSenseReversed ? 1 : 0) + "\n";
+  allData += kv("pending", overridePending ? 1 : 0) + "\n";
+  allData += kv("latched", overrideLatched ? 1 : 0) + "\n";
+  allData += kv("dirty", settingsDirty ? 1 : 0) + "\n";
+  allData += "end\n";
+  
+  // Print to Serial
+  Serial.print(allData);
+  
+  // Send via BLE as ONE packet
+  if (bleConnected) {
+    Serial.println("[BLE TX] Sending getall response (" + String(allData.length()) + " bytes)");
+    txChar->setValue(allData.c_str());
+    txChar->notify();
+    delay(50);
+  }
+  
+  Serial.println("[CMD] getall complete");
 }
 
 bool emitGetKey(const String& key) {
@@ -415,75 +529,103 @@ bool emitGetKey(const String& key) {
 
 void emitTelemetryKvLine() {
   if (!telemetryEnabled) return;
+  
+  // Build telemetry as ONE compact line with "tele " prefix
   String line = "tele ";
-  line += kv("rpm", (int)lround(currentRPM)) + " ";
-  line += kv("target", (int)lround(setpointRPM)) + " ";
-  line += kv("servo", servoPosition) + " ";
-  line += kv("mode", modeString()) + " ";
-  line += kv("pid_out", (int)lround(pidOutput)) + " ";
-  line += kv("dirty", settingsDirty ? 1 : 0) + " ";
-  line += "end";
-  ioPrintln(line);
+  line += "rpm=" + String((int)lround(currentRPM)) + " ";
+  line += "target=" + String((int)lround(setpointRPM)) + " ";
+  line += "servo=" + String(servoPosition) + " ";
+  line += "mode=" + modeString() + " ";
+  line += "pid_out=" + String((int)lround(pidOutput)) + " ";
+  line += "dirty=" + String(settingsDirty ? 1 : 0);
+  
+  // Send via BLE only
+  if (bleConnected) {
+    txChar->setValue(line.c_str());
+    txChar->notify();
+  }
 }
 
 // ===== Setup =====
 void setup() {
   Serial.begin(115200);
-
+  delay(1500);
+  
+  Serial.println("\n\n\n");
+  Serial.println("========================================");
+  Serial.println("========================================");
+  Serial.println("  EMC Type 1 Controller");
+  Serial.println("  Version: UNO LED BLE FINAL");
+  Serial.println("  NimBLE Universal Compatible");
+  Serial.println("  GUI Communication: OPTIMIZED");
+  Serial.println("========================================");
+  Serial.println("========================================\n");
+  
+  Serial.println("Loading calibration data from NVS...");
   loadCalibrationData();
   settingsDirty = false;
-
+  
   bleInit();
-
+  
+  Serial.println("Configuring GPIO pins...");
   pinMode(rpmSensorPin, INPUT_PULLUP);
   pinMode(potentiometerPin, INPUT);
   pinMode(manualPotPin, INPUT);
   pinMode(armLightPin, OUTPUT);
   pinMode(armSwitchPin, INPUT_PULLUP);
-
+  
+  Serial.println("Configuring ADC...");
   analogReadResolution(12);
   analogSetPinAttenuation(potentiometerPin, ADC_11db);
   analogSetPinAttenuation(manualPotPin, ADC_11db);
-
+  
+  Serial.println("Attaching RPM interrupt (pin 19)...");
   attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulseISR, FALLING);
-
+  
+  Serial.println("Initializing servo (pin 18)...");
   clutchServo.attach(servoPin);
   servoPosition = neutral_position;
   clutchServo.write(servoPosition);
-
+  
+  Serial.println("Configuring PID controller...");
   myPID.SetControllerDirection((pidDirectionSetting == PID_DIR_REVERSE) ? REVERSE : DIRECT);
   myPID.SetMode(AUTOMATIC);
   myPID.SetOutputLimits(min_position, max_position);
   myPID.SetSampleTime(pidSampleTimeMs);
   myPID.SetTunings(Kp, Ki, Kd);
-
+  
   digitalWrite(armLightPin, LOW);
-
   inputString.reserve(200);
-
+  
   systemArmed = false;
   overridePending = false;
   overrideLatched = false;
-
+  
   applyTelemetryPolicy();
   lastTelemetryTime = 0;
-
-  ioPrintln("=== EMC Type 1 Controller (UNO LED) Initialized ===");
+  
+  Serial.println("\n========================================");
+  Serial.println("========================================");
+  ioPrintln("=== EMC Type 1 Controller READY ===");
   printCalibrationStatus();
-  ioPrintln("Type 'help' for commands. GUI: use getall");
+  ioPrintln("Type 'help' for commands");
+  ioPrintln("GUI: use 'getall' to populate fields");
+  Serial.println("========================================");
+  Serial.println("========================================\n");
+  Serial.println("✅ System ready. Waiting for BLE connections and commands...\n");
 }
 
 // ===== Loop =====
 void loop() {
   readSensors();
-  processInput();        // optional: serial bench
+  processInput();
   updateSystemState();
-
+  
   if (systemArmed) runPIDControl();
   else runManualControl();
-
+  
   updateOutputs();
-
+  
   if (telemetryEnabled && (millis() - lastTelemetryTime >= telemetryIntervalMs)) {
     emitTelemetryKvLine();
     lastTelemetryTime = millis();
@@ -494,7 +636,6 @@ void loop() {
 void IRAM_ATTR rpmPulseISR() {
   const unsigned long now = micros();
   const unsigned long dt  = now - lastPulseMicros;
-
   if (dt >= minPulsePeriodMicros) {
     lastPulseMicros = now;
     pulsePeriodMicros = dt;
@@ -506,18 +647,16 @@ void IRAM_ATTR rpmPulseISR() {
 // ===== Sensor Reading =====
 void readSensors() {
   const unsigned long now = micros();
-
-  unsigned long period;
-  unsigned long lastPulse;
+  unsigned long period, lastPulse;
   bool hasNew;
-
+  
   noInterrupts();
   period = pulsePeriodMicros;
   lastPulse = lastPulseMicros;
   hasNew = newPeriodAvailable;
   newPeriodAvailable = false;
   interrupts();
-
+  
   if (now - lastPulse > rpmTimeoutMicros) {
     currentRPM = 0.0;
   } else if (hasNew && period > 0 && pulsesPerRevolution > 0) {
@@ -525,7 +664,7 @@ void readSensors() {
     if (currentRPM <= 0.0) currentRPM = rpmInstant;
     else currentRPM = (1.0 - rpmFilterAlpha) * currentRPM + rpmFilterAlpha * rpmInstant;
   }
-
+  
   potValue = analogRead(potentiometerPin);
   manualPotValue = analogRead(manualPotPin);
   armSwitch = !digitalRead(armSwitchPin);
@@ -535,11 +674,10 @@ void readSensors() {
 void processCommand(String command) {
   command.trim();
   if (!command.length()) return;
-
+  
   String lower = command;
   lower.toLowerCase();
-
-  // --- GUI protocol ---
+  
   if (lower == "getall") { emitGetAll(); return; }
   if (lower.startsWith("get ")) {
     String key = command.substring(4);
@@ -547,8 +685,7 @@ void processCommand(String command) {
     if (!emitGetKey(key)) ioPrintln("err=unknown_key");
     return;
   }
-
-  // --- existing commands ---
+  
   if (lower.startsWith("setrpm ")) {
     double newSetpoint = lower.substring(7).toDouble();
     if (newSetpoint > 0 && newSetpoint <= 100000) {
@@ -579,7 +716,7 @@ void processCommand(String command) {
     else ioPrintln("err=usage_piddir");
   }
   else if (lower.startsWith("aggressiveness ")) {
-    double value = lower.substring(14).toDouble();
+    double value = lower.substring(15).toDouble();
     if (value >= 0.1 && value <= 3.0) {
       pidAggressiveness = value;
       settingsDirty = true;
@@ -655,7 +792,20 @@ void processCommand(String command) {
   }
 }
 
-// ===== Disarm helper =====
+void processInput() {
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    if (inChar == '\n') stringComplete = true;
+    else inputString += inChar;
+  }
+  if (stringComplete) {
+    inputString.trim();
+    if (inputString.length()) processCommand(inputString);
+    inputString = "";
+    stringComplete = false;
+  }
+}
+
 void disarmSystem(const String &reason) {
   systemArmed = false;
   overridePending = false;
@@ -663,7 +813,6 @@ void disarmSystem(const String &reason) {
   ioPrintln(reason);
 }
 
-// ===== PID & Manual Control =====
 void runPIDControl() {
   if (myPID.Compute()) {
     double scaledOutput = pidOutput * pidAggressiveness;
@@ -680,47 +829,45 @@ void runManualControl() {
   clutchServo.write(servoPosition);
 }
 
-// ===== System State =====
 void updateSystemState() {
   bool armSwitchCurrentState = armSwitch;
-
+  
   if (!overrideEnabled) {
     overridePending = false;
     overrideLatched = false;
   }
-
+  
   static bool wasOverridePending = false;
-
+  
   if (overrideEnabled && systemArmed) {
     const double manualNorm = getManualPotNormForOverride(manualPotValue);
     const double threshNorm = (double)overrideThresholdPct / 100.0;
-
+    
     if (manualNorm >= threshNorm) {
       overridePending = true;
       if (!wasOverridePending) {
         ioPrintln("OVERRIDE PENDING: manual pot >= threshold; PID remains ACTIVE.");
       }
     }
-
+    
     if (overridePending && (manualNorm < threshNorm)) {
       disarmSystem("OVERRIDE RECOVERED: manual pot below threshold; now MANUAL.");
       overrideLatched = true;
       ioPrintln("OVERRIDE LATCHED: requires ARM SWITCH re-arm.");
     }
   }
-
+  
   wasOverridePending = overridePending;
-
+  
   if (armSwitchCurrentState && !armSwitchPreviousState) {
     attemptArmFromSwitch();
   } else if (!armSwitchCurrentState && armSwitchPreviousState && systemArmed) {
     disarmSystem("System DISARMED via switch");
   }
-
+  
   armSwitchPreviousState = armSwitchCurrentState;
 }
 
-// ===== Arming =====
 bool attemptArm() {
   if (overrideEnabled) {
     const double manualNorm = getManualPotNormForOverride(manualPotValue);
@@ -730,16 +877,16 @@ bool attemptArm() {
       return false;
     }
   }
-
+  
   servoPosition = applyCalibration(pidStartPosition);
   clutchServo.write(servoPosition);
-
+  
   systemArmed = true;
   overridePending = false;
-
+  
   applyTelemetryPolicy();
   if (telemetryEnabled) lastTelemetryTime = 0;
-
+  
   ioPrintln("System ARMED - Automatic PID Mode");
   return true;
 }
@@ -752,11 +899,6 @@ bool attemptArmFromSwitch() {
   return attemptArm();
 }
 
-// ===== Outputs =====
-// LED annunciation:
-// - overrideLatched: fast blink
-// - systemArmed: solid ON
-// - manual: slow blink
 void updateOutputs() {
   if (overrideLatched) {
     if (millis() - lastLEDFlash >= ledFlashIntervalOverride) {
@@ -766,12 +908,12 @@ void updateOutputs() {
     }
     return;
   }
-
+  
   if (systemArmed) {
     digitalWrite(armLightPin, HIGH);
     return;
   }
-
+  
   if (millis() - lastLEDFlash >= ledFlashInterval) {
     ledState = !ledState;
     digitalWrite(armLightPin, ledState);
@@ -779,17 +921,15 @@ void updateOutputs() {
   }
 }
 
-// ===== Calibration Helpers =====
 int applyCalibration(int position) {
   position = constrain(position, min_position, max_position);
   if (direction_reversed) position = max_position - (position - min_position);
   return position;
 }
 
-// ===== Calibration Commands =====
 void processCalibrationCommand(String command) {
   command.trim(); command.toLowerCase();
-
+  
   if (command.startsWith("set_min ")) {
     int value = command.substring(8).toInt();
     if (value >= 0 && value < max_position) {
@@ -857,10 +997,9 @@ void processCalibrationCommand(String command) {
   }
 }
 
-// ===== Safety Commands =====
 void processSafetyCommand(String command) {
   command.trim(); command.toLowerCase();
-
+  
   if (command == "enable") {
     overrideEnabled = true;
     settingsDirty = true;
@@ -879,7 +1018,6 @@ void processSafetyCommand(String command) {
     else ioPrintln("ok=thr_pct");
   }
   else if (command.startsWith("set_threshold ")) {
-    // legacy ADC setter
     int adc = command.substring(14).toInt();
     if (adc < manualPotMin || adc > manualPotMax) ioPrintln("err=bad_thr_adc");
     else { setOverrideThresholdAdcLegacy(adc); ioPrintln("ok=thr_adc"); }
@@ -895,7 +1033,6 @@ void processSafetyCommand(String command) {
   }
 }
 
-// ===== Print =====
 void printDetailedStatus() {
   ioPrintln("=== STATUS ===");
   ioPrintln("RPM: " + String(currentRPM));
@@ -915,6 +1052,8 @@ void printDetailedStatus() {
             String(overrideSenseReversed ? "REV" : "NOR"));
   ioPrintln("Pending: " + String(overridePending ? "YES" : "NO") + " | Latched: " + String(overrideLatched ? "YES" : "NO"));
   ioPrintln(String("dirty=") + (settingsDirty ? "1" : "0"));
+  ioPrintln("BLE Connected: " + String(bleConnected ? "YES" : "NO"));
+  ioPrintln("BLE Notifications: " + String(bleNotificationsEnabled ? "ENABLED" : "DISABLED"));
   ioPrintln("================");
 }
 
@@ -950,61 +1089,45 @@ void printCalibrationStatus() {
   ioPrintln("===================");
 }
 
-// ===== Preferences =====
 void saveCalibrationData() {
   preferences.begin("emc_calibration", false);
-
   preferences.putInt("min_pos", min_position);
   preferences.putInt("max_pos", max_position);
   preferences.putInt("neutral_pos", neutral_position);
   preferences.putBool("direction", direction_reversed);
-
   preferences.putInt("pot_min", manualPotMin);
   preferences.putInt("pot_max", manualPotMax);
-
-  // legacy key (ADC equivalent) for backward visibility
   preferences.putInt("override_thresh", pctToAdcForOverride(overrideThresholdPct));
   preferences.putBool("override_en", overrideEnabled);
-
   preferences.putInt("ov_thr_pct", overrideThresholdPct);
   preferences.putBool("ov_sense_rev", overrideSenseReversed);
-
   preferences.putInt("ppr", pulsesPerRevolution);
   preferences.putInt("pid_ts", pidSampleTimeMs);
   preferences.putInt("rpm_alpha_x100", (int)lround(rpmFilterAlpha * 100.0));
-
   preferences.putInt("start_pos", pidStartPosition);
-
   preferences.putDouble("setpoint", setpointRPM);
   preferences.putDouble("kp", Kp);
   preferences.putDouble("ki", Ki);
   preferences.putDouble("kd", Kd);
   preferences.putDouble("aggr", pidAggressiveness);
-
   preferences.putInt("pid_dir", (int)pidDirectionSetting);
-
   preferences.putInt("tele_mode", (int)telemetryMode);
   preferences.putInt("tele_ms", (int)telemetryIntervalMs);
-
   preferences.end();
   ioPrintln("Saved ALL settings to NVS.");
 }
 
 void loadCalibrationData() {
   preferences.begin("emc_calibration", false);
-
   min_position = preferences.getInt("min_pos", 0);
   max_position = preferences.getInt("max_pos", 180);
   neutral_position = preferences.getInt("neutral_pos", 90);
   direction_reversed = preferences.getBool("direction", false);
-
   manualPotMin = preferences.getInt("pot_min", 0);
   manualPotMax = preferences.getInt("pot_max", 4095);
   if (manualPotMin >= manualPotMax) manualPotMin = 0;
-
   overrideEnabled = preferences.getBool("override_en", false);
   overrideSenseReversed = preferences.getBool("ov_sense_rev", false);
-
   int loadedPct = preferences.getInt("ov_thr_pct", -1);
   if (loadedPct >= 0 && loadedPct <= 100) {
     overrideThresholdPct = loadedPct;
@@ -1013,48 +1136,35 @@ void loadCalibrationData() {
     legacyAdc = constrain(legacyAdc, manualPotMin, manualPotMax);
     overrideThresholdPct = adcToPctForOverride(legacyAdc);
   }
-
   int loadedPPR = preferences.getInt("ppr", 1);
   pulsesPerRevolution = (loadedPPR == 1 || loadedPPR == 2 || loadedPPR == 4) ? loadedPPR : 1;
-
   int loadedTs = preferences.getInt("pid_ts", 100);
   pidSampleTimeMs = constrain(loadedTs, 10, 200);
-
   int alphaX100 = preferences.getInt("rpm_alpha_x100", 30);
   double loadedAlpha = alphaX100 / 100.0;
   rpmFilterAlpha = constrain(loadedAlpha, 0.10, 0.50);
-
   pidStartPosition = preferences.getInt("start_pos", pidStartPosition);
   pidStartPosition = constrain(pidStartPosition, min_position, max_position);
-
   double loadedSetpoint = preferences.getDouble("setpoint", setpointRPM);
   if (loadedSetpoint > 0 && loadedSetpoint <= 100000) setpointRPM = loadedSetpoint;
-
   double loadedKp = preferences.getDouble("kp", Kp);
   double loadedKi = preferences.getDouble("ki", Ki);
   double loadedKd = preferences.getDouble("kd", Kd);
   if (loadedKp >= 0) Kp = loadedKp;
   if (loadedKi >= 0) Ki = loadedKi;
   if (loadedKd >= 0) Kd = loadedKd;
-
   double loadedAggr = preferences.getDouble("aggr", pidAggressiveness);
   if (loadedAggr >= 0.1 && loadedAggr <= 3.0) pidAggressiveness = loadedAggr;
-
   int loadedPidDir = preferences.getInt("pid_dir", (int)PID_DIR_DIRECT);
   if (loadedPidDir != (int)PID_DIR_DIRECT && loadedPidDir != (int)PID_DIR_REVERSE) loadedPidDir = (int)PID_DIR_DIRECT;
   pidDirectionSetting = (PidDirectionSetting)loadedPidDir;
-
   int loadedTeleMode = preferences.getInt("tele_mode", (int)TELE_AUTO);
   if (loadedTeleMode < 0 || loadedTeleMode > 2) loadedTeleMode = (int)TELE_AUTO;
   telemetryMode = (TelemetryMode)loadedTeleMode;
-
   int loadedTeleMs = preferences.getInt("tele_ms", 500);
   if (loadedTeleMs < (int)telemetryRateMinMs) loadedTeleMs = telemetryRateMinMs;
   if (loadedTeleMs > (int)telemetryRateMaxMs) loadedTeleMs = telemetryRateMaxMs;
   telemetryIntervalMs = (unsigned long)loadedTeleMs;
-
   preferences.end();
   Serial.println("Calibration/settings loaded from NVS.");
 }
-
-
