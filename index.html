@@ -1,3 +1,7 @@
+<!-- ============================
+     EMC BLE GUI - COMPLETE VERSION
+     All Parameters Settable
+     ============================ -->
 <!doctype html>
 <html>
 <head>
@@ -6,35 +10,49 @@
   <title>EMC BLE GUI</title>
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; }
-    .card { border: 1px solid #ccc; border-radius: 10px; padding: 12px; min-width: 280px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+    .card { border: 1px solid #ccc; border-radius: 10px; padding: 12px; min-width: 280px; flex: 1 1 280px; }
     .card h3 { margin: 0 0 10px 0; font-size: 16px; }
     label { display: block; font-size: 12px; opacity: 0.8; margin-top: 8px; }
     input, select, button { font-size: 14px; padding: 8px; }
     input, select { width: 100%; box-sizing: border-box; }
     button { cursor: pointer; }
     #log { width: 100%; height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px; font-family: ui-monospace, monospace; }
+    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px; font-family: ui-monospace, monospace; }
     .kv div { padding: 2px 0; }
     .good { color: #0a7; } .bad { color: #c22; }
+    .muted { opacity: 0.7; }
+    .btnRow { display:flex; gap:8px; flex-wrap:wrap; }
+    .btnRow button { flex: 1 1 120px; }
+    hr { margin: 12px 0; border: none; border-top: 1px solid #ddd; }
+    h4 { font-size: 14px; margin: 8px 0; }
   </style>
 </head>
 <body>
-  <h2>EMC BLE GUI</h2>
+  <h2>EMC BLE GUI - Complete Control</h2>
+
   <div class="row">
     <div class="card">
       <h3>Connection</h3>
-      <button id="btnConnect">Connect</button>
-      <button id="btnDisconnect" disabled>Disconnect</button>
+      <div class="btnRow">
+        <button id="btnConnect">Connect</button>
+        <button id="btnDisconnect" disabled>Disconnect</button>
+      </div>
+
       <div style="margin-top:10px;">
         <div>Status: <span id="connStatus" class="bad">disconnected</span></div>
         <div>Device: <span id="devName">—</span></div>
       </div>
-      <div style="margin-top:12px;">
+
+      <div style="margin-top:12px;" class="btnRow">
         <button id="btnGetAll" disabled>Get All</button>
         <button id="btnSave" disabled>Save</button>
         <button id="btnArm" disabled>Arm</button>
         <button id="btnDisarm" disabled>Disarm</button>
+      </div>
+
+      <div class="muted" style="margin-top:10px;">
+        <div>Tip: Connect → auto-sends <code>getall</code>.</div>
       </div>
     </div>
 
@@ -45,7 +63,13 @@
         <div>target</div><div id="v_target">—</div>
         <div>servo</div><div id="v_servo">—</div>
         <div>mode</div><div id="v_mode">—</div>
+        <div>pid_out</div><div id="v_pid_out">—</div>
         <div>dirty</div><div id="v_dirty">—</div>
+
+        <div>prehold</div><div id="v_prehold">—</div>
+        <div>override_en</div><div id="v_override_en">—</div>
+        <div>pending</div><div id="v_pending">—</div>
+        <div>latched</div><div id="v_latched">—</div>
       </div>
     </div>
 
@@ -57,9 +81,9 @@
 
       <label>Kp Ki Kd</label>
       <div class="row" style="gap:8px;">
-        <input id="inKp" type="number" step="0.01" placeholder="Kp" />
-        <input id="inKi" type="number" step="0.01" placeholder="Ki" />
-        <input id="inKd" type="number" step="0.01" placeholder="Kd" />
+        <input id="inKp" type="number" step="0.000001" placeholder="Kp" />
+        <input id="inKi" type="number" step="0.000001" placeholder="Ki" />
+        <input id="inKd" type="number" step="0.000001" placeholder="Kd" />
       </div>
       <button id="btnSetPid" disabled>Send setpid</button>
 
@@ -71,7 +95,7 @@
       <button id="btnPidDir" disabled>Send piddir</button>
 
       <label>Aggressiveness (0.1–3.0)</label>
-      <input id="inAggr" type="number" step="0.1" />
+      <input id="inAggr" type="number" step="0.1" min="0.1" max="3.0" />
       <button id="btnAggr" disabled>Send aggressiveness</button>
     </div>
 
@@ -86,16 +110,22 @@
       <button id="btnPpr" disabled>Send ppr</button>
 
       <label>Sample time (ms 10–200)</label>
-      <input id="inSample" type="number" step="1" />
+      <input id="inSample" type="number" step="1" min="10" max="200" />
       <button id="btnSample" disabled>Send setsample</button>
 
       <label>RPM Filter Alpha (0.10–0.50)</label>
-      <input id="inAlpha" type="number" step="0.01" />
+      <input id="inAlpha" type="number" step="0.01" min="0.10" max="0.50" />
       <button id="btnAlpha" disabled>Send setalpha</button>
 
       <label>Pre-PID start position (deg)</label>
-      <input id="inStart" type="number" step="1" />
+      <input id="inStart" type="number" step="1" min="0" max="180" />
       <button id="btnStart" disabled>Send setstart</button>
+
+      <label>Prehold</label>
+      <div class="btnRow">
+        <button id="btnPreholdOn" disabled>Prehold ON</button>
+        <button id="btnPreholdOff" disabled>Prehold OFF</button>
+      </div>
     </div>
 
     <div class="card">
@@ -109,20 +139,20 @@
       <button id="btnTeleMode" disabled>Send telemetry mode</button>
 
       <label>Rate (ms 50–5000)</label>
-      <input id="inTeleMs" type="number" step="10" />
+      <input id="inTeleMs" type="number" step="10" min="50" max="5000" />
       <button id="btnTeleRate" disabled>Send telemetry rate</button>
     </div>
 
     <div class="card">
       <h3>Safety Override</h3>
       <label>Enable/Disable</label>
-      <div class="row" style="gap:8px;">
+      <div class="btnRow">
         <button id="btnSafetyEn" disabled>Enable</button>
         <button id="btnSafetyDis" disabled>Disable</button>
       </div>
 
       <label>Threshold (% 0–100)</label>
-      <input id="inThrPct" type="number" step="1" />
+      <input id="inThrPct" type="number" step="1" min="0" max="100" />
       <button id="btnThrPct" disabled>Send threshold %</button>
 
       <label>Sense</label>
@@ -132,11 +162,84 @@
       </select>
       <button id="btnSense" disabled>Send sense</button>
     </div>
+
+    <div class="card">
+      <h3>Servo Calibration</h3>
+      <div class="kv">
+        <div>min_pos</div><div id="v_min_pos">—</div>
+        <div>max_pos</div><div id="v_max_pos">—</div>
+        <div>neutral_pos</div><div id="v_neutral_pos">—</div>
+        <div>cal_dir</div><div id="v_cal_dir">—</div>
+      </div>
+
+      <hr>
+      <h4>Set Servo Calibration</h4>
+
+      <label>Min Position (deg 0–179)</label>
+      <input id="inMinPos" type="number" step="1" min="0" max="179" />
+      <button id="btnMinPos" disabled>Send set_min</button>
+
+      <label>Max Position (deg 1–180)</label>
+      <input id="inMaxPos" type="number" step="1" min="1" max="180" />
+      <button id="btnMaxPos" disabled>Send set_max</button>
+
+      <label>Neutral Position (deg)</label>
+      <input id="inNeutralPos" type="number" step="1" min="0" max="180" />
+      <button id="btnNeutralPos" disabled>Send set_neutral</button>
+
+      <label>Direction Reversed</label>
+      <select id="selCalDir">
+        <option value="0">Normal (0)</option>
+        <option value="1">Reversed (1)</option>
+      </select>
+      <button id="btnCalDir" disabled>Send direction</button>
+
+      <div class="muted" style="margin-top:8px;">
+        ⚠️ Changing these moves the servo immediately!
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Potentiometer Calibration</h3>
+      <div class="kv">
+        <div>pot_min</div><div id="v_pot_min">—</div>
+        <div>pot_max</div><div id="v_pot_max">—</div>
+      </div>
+
+      <hr>
+      <h4>Set Pot Calibration</h4>
+
+      <label>Pot Min (ADC 0–4095)</label>
+      <input id="inPotMin" type="number" step="1" min="0" max="4095" />
+      <button id="btnPotMin" disabled>Send pot_min</button>
+
+      <label>Pot Max (ADC 0–4095)</label>
+      <input id="inPotMax" type="number" step="1" min="0" max="4095" />
+      <button id="btnPotMax" disabled>Send pot_max</button>
+
+      <div class="muted" style="margin-top:8px;">
+        Read raw ADC from manual pot, set min/max accordingly.
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Debug Info</h3>
+      <div class="kv">
+        <div>pid_floor_lo</div><div id="v_pid_floor_lo">—</div>
+        <div>pid_floor_hi</div><div id="v_pid_floor_hi">—</div>
+      </div>
+      <div class="muted" style="margin-top:8px;">
+        These update automatically based on prehold state and calibration.
+      </div>
+    </div>
   </div>
 
   <h3>Log</h3>
   <textarea id="log" readonly></textarea>
 
+<!-- ============================
+     JAVASCRIPT: BLE + PARSING + KV MAPPING
+     ============================ -->
 <script>
   // Nordic UART Service UUIDs
   const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
@@ -147,6 +250,9 @@
   let server = null;
   let rxChar = null;
   let txChar = null;
+
+  // Buffer for BLE notification chunks (prevents broken parsing)
+  let notifyBuf = "";
 
   const $ = (id) => document.getElementById(id);
 
@@ -160,69 +266,133 @@
     $("btnConnect").disabled = yes;
 
     const enable = (id) => $(id).disabled = !yes;
-    ["btnGetAll","btnSave","btnArm","btnDisarm",
-     "btnSetRpm","btnSetPid","btnPidDir","btnAggr",
-     "btnPpr","btnSample","btnAlpha","btnStart",
-     "btnTeleMode","btnTeleRate",
-     "btnSafetyEn","btnSafetyDis","btnThrPct","btnSense"
+    [
+      "btnGetAll","btnSave","btnArm","btnDisarm",
+      "btnSetRpm","btnSetPid","btnPidDir","btnAggr",
+      "btnPpr","btnSample","btnAlpha","btnStart",
+      "btnPreholdOn","btnPreholdOff",
+      "btnTeleMode","btnTeleRate",
+      "btnSafetyEn","btnSafetyDis","btnThrPct","btnSense",
+      "btnMinPos","btnMaxPos","btnNeutralPos","btnCalDir",
+      "btnPotMin","btnPotMax"
     ].forEach(enable);
 
     $("connStatus").textContent = yes ? "connected" : "disconnected";
     $("connStatus").className = yes ? "good" : "bad";
   }
 
+  function setText(id, v) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = v;
+  }
+
   function applyKV(k, v) {
+    // Live readouts mapping
     const map = {
       rpm: "v_rpm",
       target: "v_target",
       servo: "v_servo",
       mode: "v_mode",
+      pid_out: "v_pid_out",
       dirty: "v_dirty",
-    };
-    if (map[k]) $(map[k]).textContent = v;
 
-    // also populate inputs when getall arrives
+      prehold: "v_prehold",
+      override_en: "v_override_en",
+      pending: "v_pending",
+      latched: "v_latched",
+
+      min_pos: "v_min_pos",
+      max_pos: "v_max_pos",
+      neutral_pos: "v_neutral_pos",
+      cal_dir: "v_cal_dir",
+      pot_min: "v_pot_min",
+      pot_max: "v_pot_max",
+      pid_floor_lo: "v_pid_floor_lo",
+      pid_floor_hi: "v_pid_floor_hi",
+    };
+
+    if (map[k]) setText(map[k], v);
+
+    // Populate inputs when getall arrives (or when we see the key)
     if (k === "target") $("inSetRpm").value = v;
     if (k === "kp") $("inKp").value = v;
     if (k === "ki") $("inKi").value = v;
     if (k === "kd") $("inKd").value = v;
     if (k === "aggr") $("inAggr").value = v;
-    if (k === "ppr") $("selPpr").value = v;
+    if (k === "ppr") $("selPpr").value = String(v);
     if (k === "ts") $("inSample").value = v;
     if (k === "alpha") $("inAlpha").value = v;
+
+    // start_pos (your sketch uses this key)
+    if (k === "start_pos") $("inStart").value = v;
+
+    // Safety keys
     if (k === "ov_thr_pct") $("inThrPct").value = v;
-    if (k === "ov_sense") $("selSense").value = (v === "1") ? "reversed" : "normal";
+    if (k === "ov_sense") $("selSense").value = (String(v) === "1") ? "reversed" : "normal";
+
+    // PID dir string: "DIRECT"/"REVERSE"
     if (k === "pid_dir") $("selPidDir").value = (String(v).toLowerCase().includes("rev")) ? "reverse" : "direct";
+
+    // Telemetry keys
     if (k === "tele_mode") $("selTeleMode").value = String(v).toLowerCase();
     if (k === "tele_ms") $("inTeleMs").value = v;
+
+    // Calibration inputs
+    if (k === "min_pos") $("inMinPos").value = v;
+    if (k === "max_pos") $("inMaxPos").value = v;
+    if (k === "neutral_pos") $("inNeutralPos").value = v;
+    if (k === "cal_dir") $("selCalDir").value = String(v);
+    if (k === "pot_min") $("inPotMin").value = v;
+    if (k === "pot_max") $("inPotMax").value = v;
   }
 
   function parseLine(line) {
     line = line.trim();
     if (!line) return;
 
-    // "tele k=v k=v ... end"
+    // Ignore terminator
+    if (line === "end") return;
+
+    // "tele k=v k=v ..."
     if (line.startsWith("tele ")) {
       const parts = line.substring(5).split(/\s+/);
       for (const p of parts) {
         if (p === "end") break;
         const i = p.indexOf("=");
-        if (i > 0) applyKV(p.substring(0,i), p.substring(i+1));
+        if (i > 0) applyKV(p.substring(0, i), p.substring(i + 1));
       }
       return;
     }
 
-    // single key=value lines (getall)
+    // single key=value lines (getall / get key / responses)
     const i = line.indexOf("=");
     if (i > 0) {
-      applyKV(line.substring(0,i), line.substring(i+1));
+      applyKV(line.substring(0, i), line.substring(i + 1));
       return;
     }
 
+    // otherwise, treat as plain log text
     logLine(line);
   }
 
+  function handleNotifyText(text) {
+    // Accumulate chunks until we have full lines
+    notifyBuf += text;
+
+    // Split into lines; keep trailing partial in notifyBuf
+    const lines = notifyBuf.split(/\r?\n/);
+    notifyBuf = lines.pop(); // last (possibly partial)
+
+    for (const line of lines) parseLine(line);
+  }
+
   async function connect() {
+    if (!navigator.bluetooth) {
+      alert("Web Bluetooth not available in this browser.");
+      return;
+    }
+
     device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [NUS_SERVICE] }],
       optionalServices: [NUS_SERVICE]
@@ -232,6 +402,8 @@
     device.addEventListener("gattserverdisconnected", () => {
       logLine("[BLE] disconnected");
       setConnected(false);
+      rxChar = null; txChar = null; server = null;
+      notifyBuf = "";
     });
 
     server = await device.gatt.connect();
@@ -244,8 +416,7 @@
     txChar.addEventListener("characteristicvaluechanged", (ev) => {
       const v = ev.target.value;
       const text = new TextDecoder().decode(v);
-      // can contain partials; split by newline
-      for (const line of text.split(/\r?\n/)) parseLine(line);
+      handleNotifyText(text);
     });
 
     setConnected(true);
@@ -254,15 +425,21 @@
   }
 
   async function disconnect() {
-    if (device && device.gatt.connected) device.gatt.disconnect();
-    setConnected(false);
+    try {
+      if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
+    } finally {
+      setConnected(false);
+      rxChar = null; txChar = null; server = null;
+      notifyBuf = "";
+    }
   }
 
   async function sendCmd(cmd) {
     if (!rxChar) return;
     const enc = new TextEncoder();
     const data = enc.encode(cmd + "\n");
-    // writeWithoutResponse is typically better for UART
+
+    // writeWithoutResponse is typically better for UART-style links
     if (rxChar.properties.writeWithoutResponse) {
       await rxChar.writeValueWithoutResponse(data);
     } else {
@@ -270,7 +447,12 @@
     }
     logLine(">> " + cmd);
   }
+</script>
 
+<!-- ============================
+     JAVASCRIPT: UI WIRING
+     ============================ -->
+<script>
   $("btnConnect").onclick = connect;
   $("btnDisconnect").onclick = disconnect;
 
@@ -289,6 +471,9 @@
   $("btnAlpha").onclick = () => sendCmd(`setalpha ${$("inAlpha").value}`);
   $("btnStart").onclick = () => sendCmd(`setstart ${$("inStart").value}`);
 
+  $("btnPreholdOn").onclick  = () => sendCmd("prehold on");
+  $("btnPreholdOff").onclick = () => sendCmd("prehold off");
+
   $("btnTeleMode").onclick = () => sendCmd(`telemetry ${$("selTeleMode").value}`);
   $("btnTeleRate").onclick = () => sendCmd(`telemetry rate ${$("inTeleMs").value}`);
 
@@ -297,7 +482,17 @@
   $("btnThrPct").onclick = () => sendCmd(`safety set_threshold_pct ${$("inThrPct").value}`);
   $("btnSense").onclick = () => sendCmd(`safety sense ${$("selSense").value}`);
 
+  // CALIBRATION COMMANDS
+  $("btnMinPos").onclick = () => sendCmd(`calibrate set_min ${$("inMinPos").value}`);
+  $("btnMaxPos").onclick = () => sendCmd(`calibrate set_max ${$("inMaxPos").value}`);
+  $("btnNeutralPos").onclick = () => sendCmd(`calibrate set_neutral ${$("inNeutralPos").value}`);
+  $("btnCalDir").onclick = () => sendCmd(`calibrate direction ${$("selCalDir").value}`);
+  $("btnPotMin").onclick = () => sendCmd(`calibrate pot_min ${$("inPotMin").value}`);
+  $("btnPotMax").onclick = () => sendCmd(`calibrate pot_max ${$("inPotMax").value}`);
+
+  // Init
   setConnected(false);
+  logLine("[GUI] ready. Click Connect.");
 </script>
 </body>
 </html>
