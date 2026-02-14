@@ -1,6 +1,5 @@
 <!-- ============================
-     EMC BLE GUI - COMPLETE VERSION
-     All Parameters Settable
+     EMC BLE GUI - UPDATED FOR LOG DOWNLOAD + CSV + GRAPH
      ============================ -->
 <!doctype html>
 <html>
@@ -8,6 +7,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EMC BLE GUI</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
@@ -26,10 +26,13 @@
     .btnRow button { flex: 1 1 120px; }
     hr { margin: 12px 0; border: none; border-top: 1px solid #ddd; }
     h4 { font-size: 14px; margin: 8px 0; }
+    .pill { display:inline-block; padding:2px 6px; border-radius:6px; background:#f2f2f2; font-size:12px; }
+    #chartWrap { width: 100%; height: 380px; }
+    #chartTitle { margin: 8px 0; font-weight: 600; }
   </style>
 </head>
 <body>
-  <h2>EMC BLE GUI - Complete Control</h2>
+  <h2>EMC BLE GUI - Complete Control (Updated)</h2>
 
   <div class="row">
     <div class="card">
@@ -70,6 +73,8 @@
         <div>override_en</div><div id="v_override_en">—</div>
         <div>pending</div><div id="v_pending">—</div>
         <div>latched</div><div id="v_latched">—</div>
+        <div>ov_trip</div><div id="v_ov_trip">—</div>
+        <div>cooldown_ms</div><div id="v_cooldown_ms">—</div>
       </div>
     </div>
 
@@ -109,9 +114,8 @@
       </select>
       <button id="btnPpr" disabled>Send ppr</button>
 
-      <label>Sample time (ms 10–200)</label>
-      <input id="inSample" type="number" step="1" min="10" max="200" />
-      <button id="btnSample" disabled>Send setsample</button>
+      <label>Sample time</label>
+      <div class="pill">Fixed 3 ms (333 Hz)</div>
 
       <label>RPM Filter Alpha (0.10–0.50)</label>
       <input id="inAlpha" type="number" step="0.01" min="0.10" max="0.50" />
@@ -164,95 +168,58 @@
     </div>
 
     <div class="card">
-      <h3>Servo Calibration</h3>
-      <div class="kv">
-        <div>min_pos</div><div id="v_min_pos">—</div>
-        <div>max_pos</div><div id="v_max_pos">—</div>
-        <div>neutral_pos</div><div id="v_neutral_pos">—</div>
-        <div>cal_dir</div><div id="v_cal_dir">—</div>
+      <h3>Logging</h3>
+      <label>List logs</label>
+      <button id="btnLogList" disabled>log list</button>
+
+      <label>Read log file (binary)</label>
+      <input id="inLogRead" type="text" placeholder="/log_1_123456.bin" />
+      <div class="btnRow">
+        <button id="btnLogRead" disabled>log read</button>
+        <button id="btnLogCancel" disabled>log cancel</button>
       </div>
 
-      <hr>
-      <h4>Set Servo Calibration</h4>
-
-      <label>Min Position (deg 0–179)</label>
-      <input id="inMinPos" type="number" step="1" min="0" max="179" />
-      <button id="btnMinPos" disabled>Send set_min</button>
-
-      <label>Max Position (deg 1–180)</label>
-      <input id="inMaxPos" type="number" step="1" min="1" max="180" />
-      <button id="btnMaxPos" disabled>Send set_max</button>
-
-      <label>Neutral Position (deg)</label>
-      <input id="inNeutralPos" type="number" step="1" min="0" max="180" />
-      <button id="btnNeutralPos" disabled>Send set_neutral</button>
-
-      <label>Direction Reversed</label>
-      <select id="selCalDir">
-        <option value="0">Normal (0)</option>
-        <option value="1">Reversed (1)</option>
-      </select>
-      <button id="btnCalDir" disabled>Send direction</button>
+      <label>CSV export</label>
+      <div class="btnRow">
+        <button id="btnCsv" disabled>Download CSV</button>
+      </div>
 
       <div class="muted" style="margin-top:8px;">
-        ⚠️ Changing these moves the servo immediately!
+        Download reads binary → auto converts to CSV + chart.
       </div>
     </div>
+  </div>
 
-    <div class="card">
-      <h3>Potentiometer Calibration</h3>
-      <div class="kv">
-        <div>pot_min</div><div id="v_pot_min">—</div>
-        <div>pot_max</div><div id="v_pot_max">—</div>
-      </div>
-
-      <hr>
-      <h4>Set Pot Calibration</h4>
-
-      <label>Pot Min (ADC 0–4095)</label>
-      <input id="inPotMin" type="number" step="1" min="0" max="4095" />
-      <button id="btnPotMin" disabled>Send pot_min</button>
-
-      <label>Pot Max (ADC 0–4095)</label>
-      <input id="inPotMax" type="number" step="1" min="0" max="4095" />
-      <button id="btnPotMax" disabled>Send pot_max</button>
-
-      <div class="muted" style="margin-top:8px;">
-        Read raw ADC from manual pot, set min/max accordingly.
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>Debug Info</h3>
-      <div class="kv">
-        <div>pid_floor_lo</div><div id="v_pid_floor_lo">—</div>
-        <div>pid_floor_hi</div><div id="v_pid_floor_hi">—</div>
-      </div>
-      <div class="muted" style="margin-top:8px;">
-        These update automatically based on prehold state and calibration.
-      </div>
-    </div>
+  <h3>Graph</h3>
+  <div id="chartTitle">No log loaded.</div>
+  <div id="chartWrap">
+    <canvas id="logChart"></canvas>
   </div>
 
   <h3>Log</h3>
   <textarea id="log" readonly></textarea>
 
-<!-- ============================
-     JAVASCRIPT: BLE + PARSING + KV MAPPING
-     ============================ -->
 <script>
-  // Nordic UART Service UUIDs
   const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-  const NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // write
-  const NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // notify
+  const NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+  const NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 
   let device = null;
   let server = null;
   let rxChar = null;
   let txChar = null;
 
-  // Buffer for BLE notification chunks (prevents broken parsing)
   let notifyBuf = "";
+
+  // Binary log capture state
+  let logBinaryActive = false;
+  let logExpectedBytes = 0;
+  let logReceivedBytes = 0;
+  let logChunks = [];
+  let logCsvText = "";
+  let lastLogMeta = null;
+
+  let chart = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -269,12 +236,11 @@
     [
       "btnGetAll","btnSave","btnArm","btnDisarm",
       "btnSetRpm","btnSetPid","btnPidDir","btnAggr",
-      "btnPpr","btnSample","btnAlpha","btnStart",
+      "btnPpr","btnAlpha","btnStart",
       "btnPreholdOn","btnPreholdOff",
       "btnTeleMode","btnTeleRate",
       "btnSafetyEn","btnSafetyDis","btnThrPct","btnSense",
-      "btnMinPos","btnMaxPos","btnNeutralPos","btnCalDir",
-      "btnPotMin","btnPotMax"
+      "btnLogList","btnLogRead","btnLogCancel","btnCsv"
     ].forEach(enable);
 
     $("connStatus").textContent = yes ? "connected" : "disconnected";
@@ -288,7 +254,6 @@
   }
 
   function applyKV(k, v) {
-    // Live readouts mapping
     const map = {
       rpm: "v_rpm",
       target: "v_target",
@@ -301,60 +266,55 @@
       override_en: "v_override_en",
       pending: "v_pending",
       latched: "v_latched",
-
-      min_pos: "v_min_pos",
-      max_pos: "v_max_pos",
-      neutral_pos: "v_neutral_pos",
-      cal_dir: "v_cal_dir",
-      pot_min: "v_pot_min",
-      pot_max: "v_pot_max",
-      pid_floor_lo: "v_pid_floor_lo",
-      pid_floor_hi: "v_pid_floor_hi",
+      ov_trip: "v_ov_trip",
+      cooldown_ms: "v_cooldown_ms"
     };
 
     if (map[k]) setText(map[k], v);
 
-    // Populate inputs when getall arrives (or when we see the key)
     if (k === "target") $("inSetRpm").value = v;
     if (k === "kp") $("inKp").value = v;
     if (k === "ki") $("inKi").value = v;
     if (k === "kd") $("inKd").value = v;
     if (k === "aggr") $("inAggr").value = v;
     if (k === "ppr") $("selPpr").value = String(v);
-    if (k === "ts") $("inSample").value = v;
     if (k === "alpha") $("inAlpha").value = v;
-
-    // start_pos (your sketch uses this key)
     if (k === "start_pos") $("inStart").value = v;
 
-    // Safety keys
     if (k === "ov_thr_pct") $("inThrPct").value = v;
     if (k === "ov_sense") $("selSense").value = (String(v) === "1") ? "reversed" : "normal";
-
-    // PID dir string: "DIRECT"/"REVERSE"
     if (k === "pid_dir") $("selPidDir").value = (String(v).toLowerCase().includes("rev")) ? "reverse" : "direct";
-
-    // Telemetry keys
     if (k === "tele_mode") $("selTeleMode").value = String(v).toLowerCase();
     if (k === "tele_ms") $("inTeleMs").value = v;
+  }
 
-    // Calibration inputs
-    if (k === "min_pos") $("inMinPos").value = v;
-    if (k === "max_pos") $("inMaxPos").value = v;
-    if (k === "neutral_pos") $("inNeutralPos").value = v;
-    if (k === "cal_dir") $("selCalDir").value = String(v);
-    if (k === "pot_min") $("inPotMin").value = v;
-    if (k === "pot_max") $("inPotMax").value = v;
+  function parseLogBegin(line) {
+    // logfile_begin /log_xxx size=12345 format=bin record_size=13 header_size=56 footer_size=8
+    const sizeMatch = line.match(/size=(\d+)/);
+    if (!sizeMatch) return;
+    logExpectedBytes = parseInt(sizeMatch[1], 10);
+    logReceivedBytes = 0;
+    logChunks = [];
+    logBinaryActive = true;
+    logLine(`[LOG] binary read started (${logExpectedBytes} bytes)`);
   }
 
   function parseLine(line) {
     line = line.trim();
     if (!line) return;
 
-    // Ignore terminator
     if (line === "end") return;
 
-    // "tele k=v k=v ..."
+    if (line.startsWith("logfile_begin ")) {
+      parseLogBegin(line);
+      return;
+    }
+
+    if (line.startsWith("logfile_end ")) {
+      logLine("[LOG] binary read completed");
+      return;
+    }
+
     if (line.startsWith("tele ")) {
       const parts = line.substring(5).split(/\s+/);
       for (const p of parts) {
@@ -365,26 +325,204 @@
       return;
     }
 
-    // single key=value lines (getall / get key / responses)
+    if (line.startsWith("status ")) {
+      const parts = line.substring(7).split(/\s+/);
+      for (const p of parts) {
+        const i = p.indexOf("=");
+        if (i > 0) applyKV(p.substring(0, i), p.substring(i + 1));
+      }
+      return;
+    }
+
+    if (line.startsWith("ack ")) {
+      logLine("[ACK] " + line);
+      return;
+    }
+
     const i = line.indexOf("=");
     if (i > 0) {
       applyKV(line.substring(0, i), line.substring(i + 1));
       return;
     }
 
-    // otherwise, treat as plain log text
     logLine(line);
   }
 
+  function handleNotifyBytes(bytes) {
+    if (logBinaryActive) {
+      const remaining = logExpectedBytes - logReceivedBytes;
+      if (remaining > 0) {
+        const take = Math.min(remaining, bytes.length);
+        logChunks.push(bytes.slice(0, take));
+        logReceivedBytes += take;
+
+        if (logReceivedBytes >= logExpectedBytes) {
+          logBinaryActive = false;
+          const extra = bytes.slice(take);
+          finalizeLogBinary();
+          if (extra.length > 0) {
+            const text = new TextDecoder().decode(extra);
+            handleNotifyText(text);
+          }
+        }
+        return;
+      }
+    }
+
+    const text = new TextDecoder().decode(bytes);
+    handleNotifyText(text);
+  }
+
   function handleNotifyText(text) {
-    // Accumulate chunks until we have full lines
     notifyBuf += text;
-
-    // Split into lines; keep trailing partial in notifyBuf
     const lines = notifyBuf.split(/\r?\n/);
-    notifyBuf = lines.pop(); // last (possibly partial)
-
+    notifyBuf = lines.pop();
     for (const line of lines) parseLine(line);
+  }
+
+  function concatChunks(chunks, total) {
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.length;
+    }
+    return out;
+  }
+
+  function readCString(view, offset, max) {
+    const bytes = [];
+    for (let i = 0; i < max; i++) {
+      const b = view.getUint8(offset + i);
+      if (b === 0) break;
+      bytes.push(b);
+    }
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  }
+
+  function finalizeLogBinary() {
+    const bin = concatChunks(logChunks, logReceivedBytes);
+    logChunks = [];
+    if (bin.length < 56) {
+      logLine("[LOG] binary too small");
+      return;
+    }
+
+    const view = new DataView(bin.buffer, bin.byteOffset, bin.byteLength);
+    const magic = String.fromCharCode(
+      view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3)
+    );
+    if (magic !== "EMC1") {
+      logLine("[LOG] invalid magic");
+      return;
+    }
+
+    const version = view.getUint16(4, true);
+    const headerSize = view.getUint16(6, true);
+    const recordSize = view.getUint16(8, true);
+    const sampleHz = view.getUint16(10, true);
+    const startMs = view.getUint32(12, true);
+    const eventId = view.getUint32(16, true);
+    const kp = view.getFloat32(20, true);
+    const ki = view.getFloat32(24, true);
+    const kd = view.getFloat32(28, true);
+    const aggr = view.getFloat32(32, true);
+    const overrideEnabled = view.getUint8(36);
+    const overrideThresholdPct = view.getUint8(37);
+    const overrideSenseReversed = view.getUint8(38);
+    const pidDirection = view.getUint8(39);
+    const fwVersion = readCString(view, 40, 16);
+
+    const footerSize = 8;
+    const dataStart = headerSize;
+    const dataEnd = bin.length - footerSize;
+    const recordCount = Math.floor((dataEnd - dataStart) / recordSize);
+
+    const times = [];
+    const rpm = [];
+    const target = [];
+    const servo = [];
+    const pidOut = [];
+    const flags = [];
+
+    let firstTs = null;
+    let offset = dataStart;
+    for (let i = 0; i < recordCount; i++) {
+      const ts = view.getUint32(offset, true); offset += 4;
+      const r = view.getUint16(offset, true); offset += 2;
+      const t = view.getUint16(offset, true); offset += 2;
+      const s = view.getUint16(offset, true); offset += 2;
+      const f = view.getUint8(offset); offset += 1;
+      const p = view.getUint16(offset, true); offset += 2;
+
+      if (firstTs === null) firstTs = ts;
+      times.push((ts - firstTs) / 1000.0);
+      rpm.push(r);
+      target.push(t);
+      servo.push(s);
+      pidOut.push(p);
+      flags.push(f);
+    }
+
+    lastLogMeta = {
+      version, headerSize, recordSize, sampleHz, startMs, eventId,
+      kp, ki, kd, aggr, overrideEnabled, overrideThresholdPct, overrideSenseReversed,
+      pidDirection, fwVersion
+    };
+
+    updateChart(times, rpm, target, servo, pidOut, lastLogMeta);
+    buildCsv(times, rpm, target, servo, pidOut, flags, lastLogMeta);
+
+    logLine(`[LOG] parsed ${recordCount} records (event ${eventId})`);
+  }
+
+  function buildCsv(times, rpm, target, servo, pidOut, flags, meta) {
+    let csv = "";
+    csv += `# event_id=${meta.eventId}\n`;
+    csv += `# start_ms=${meta.startMs}\n`;
+    csv += `# sample_hz=${meta.sampleHz}\n`;
+    csv += `# fw=${meta.fwVersion}\n`;
+    csv += `# kp=${meta.kp} ki=${meta.ki} kd=${meta.kd} aggr=${meta.aggr}\n`;
+    csv += "t_sec,rpm,target,servo,pid_out,flags\n";
+    for (let i = 0; i < times.length; i++) {
+      csv += `${times[i].toFixed(3)},${rpm[i]},${target[i]},${servo[i]},${pidOut[i]},${flags[i]}\n`;
+    }
+    logCsvText = csv;
+    $("btnCsv").disabled = false;
+  }
+
+  function updateChart(times, rpm, target, servo, pidOut, meta) {
+    const title = `Event ${meta.eventId} | start_ms=${meta.startMs} | fw=${meta.fwVersion}`;
+    $("chartTitle").textContent = title;
+
+    const ctx = $("logChart").getContext("2d");
+    if (chart) chart.destroy();
+
+    chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: times,
+        datasets: [
+          { label: "RPM", data: rpm, borderColor: "#1f77b4", fill: false, pointRadius: 0 },
+          { label: "Target", data: target, borderColor: "#ff7f0e", fill: false, pointRadius: 0 },
+          { label: "Servo", data: servo, borderColor: "#2ca02c", fill: false, pointRadius: 0 },
+          { label: "PID Out", data: pidOut, borderColor: "#d62728", fill: false, pointRadius: 0 }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "top" },
+          title: { display: true, text: title }
+        },
+        scales: {
+          x: { title: { display: true, text: "Time (s)" } },
+          y: { title: { display: true, text: "Value" } }
+        }
+      }
+    });
   }
 
   async function connect() {
@@ -414,9 +552,8 @@
 
     await txChar.startNotifications();
     txChar.addEventListener("characteristicvaluechanged", (ev) => {
-      const v = ev.target.value;
-      const text = new TextDecoder().decode(v);
-      handleNotifyText(text);
+      const bytes = new Uint8Array(ev.target.value.buffer);
+      handleNotifyBytes(bytes);
     });
 
     setConnected(true);
@@ -439,7 +576,6 @@
     const enc = new TextEncoder();
     const data = enc.encode(cmd + "\n");
 
-    // writeWithoutResponse is typically better for UART-style links
     if (rxChar.properties.writeWithoutResponse) {
       await rxChar.writeValueWithoutResponse(data);
     } else {
@@ -447,12 +583,20 @@
     }
     logLine(">> " + cmd);
   }
-</script>
 
-<!-- ============================
-     JAVASCRIPT: UI WIRING
-     ============================ -->
-<script>
+  function downloadCsv() {
+    if (!logCsvText) return;
+    const blob = new Blob([logCsvText], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const eventLabel = lastLogMeta ? lastLogMeta.eventId : "log";
+    a.href = url;
+    a.download = `emc_event_${eventLabel}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // UI wiring
   $("btnConnect").onclick = connect;
   $("btnDisconnect").onclick = disconnect;
 
@@ -467,7 +611,6 @@
   $("btnAggr").onclick = () => sendCmd(`aggressiveness ${$("inAggr").value}`);
 
   $("btnPpr").onclick = () => sendCmd(`ppr ${$("selPpr").value}`);
-  $("btnSample").onclick = () => sendCmd(`setsample ${$("inSample").value}`);
   $("btnAlpha").onclick = () => sendCmd(`setalpha ${$("inAlpha").value}`);
   $("btnStart").onclick = () => sendCmd(`setstart ${$("inStart").value}`);
 
@@ -482,15 +625,12 @@
   $("btnThrPct").onclick = () => sendCmd(`safety set_threshold_pct ${$("inThrPct").value}`);
   $("btnSense").onclick = () => sendCmd(`safety sense ${$("selSense").value}`);
 
-  // CALIBRATION COMMANDS
-  $("btnMinPos").onclick = () => sendCmd(`calibrate set_min ${$("inMinPos").value}`);
-  $("btnMaxPos").onclick = () => sendCmd(`calibrate set_max ${$("inMaxPos").value}`);
-  $("btnNeutralPos").onclick = () => sendCmd(`calibrate set_neutral ${$("inNeutralPos").value}`);
-  $("btnCalDir").onclick = () => sendCmd(`calibrate direction ${$("selCalDir").value}`);
-  $("btnPotMin").onclick = () => sendCmd(`calibrate pot_min ${$("inPotMin").value}`);
-  $("btnPotMax").onclick = () => sendCmd(`calibrate pot_max ${$("inPotMax").value}`);
+  $("btnLogList").onclick = () => sendCmd("log list");
+  $("btnLogRead").onclick = () => sendCmd(`log read ${$("inLogRead").value}`);
+  $("btnLogCancel").onclick = () => sendCmd("log cancel");
 
-  // Init
+  $("btnCsv").onclick = downloadCsv;
+
   setConnected(false);
   logLine("[GUI] ready. Click Connect.");
 </script>
