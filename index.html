@@ -1,6 +1,3 @@
-<!-- ============================
-     EMC BLE GUI - UPDATED FOR LOG DOWNLOAD + CSV + GRAPH
-     ============================ -->
 <!doctype html>
 <html>
 <head>
@@ -168,6 +165,36 @@
     </div>
 
     <div class="card">
+      <h3>Calibration</h3>
+      <label>Servo Min (deg)</label>
+      <input id="inCalMin" type="number" step="1" min="0" max="180" />
+      <button id="btnCalMin" disabled>Send set_min</button>
+
+      <label>Servo Max (deg)</label>
+      <input id="inCalMax" type="number" step="1" min="0" max="180" />
+      <button id="btnCalMax" disabled>Send set_max</button>
+
+      <label>Servo Neutral (deg)</label>
+      <input id="inCalNeutral" type="number" step="1" min="0" max="180" />
+      <button id="btnCalNeutral" disabled>Send set_neutral</button>
+
+      <label>Direction</label>
+      <select id="selCalDir">
+        <option value="0">NORMAL</option>
+        <option value="1">REVERSED</option>
+      </select>
+      <button id="btnCalDir" disabled>Send direction</button>
+
+      <label>Manual Pot Min (ADC)</label>
+      <input id="inPotMin" type="number" step="1" min="0" max="4095" />
+      <button id="btnPotMin" disabled>Send pot_min</button>
+
+      <label>Manual Pot Max (ADC)</label>
+      <input id="inPotMax" type="number" step="1" min="0" max="4095" />
+      <button id="btnPotMax" disabled>Send pot_max</button>
+    </div>
+
+    <div class="card">
       <h3>Logging</h3>
       <label>List logs</label>
       <button id="btnLogList" disabled>log list</button>
@@ -240,6 +267,7 @@
       "btnPreholdOn","btnPreholdOff",
       "btnTeleMode","btnTeleRate",
       "btnSafetyEn","btnSafetyDis","btnThrPct","btnSense",
+      "btnCalMin","btnCalMax","btnCalNeutral","btnCalDir","btnPotMin","btnPotMax",
       "btnLogList","btnLogRead","btnLogCancel","btnCsv"
     ].forEach(enable);
 
@@ -286,10 +314,16 @@
     if (k === "pid_dir") $("selPidDir").value = (String(v).toLowerCase().includes("rev")) ? "reverse" : "direct";
     if (k === "tele_mode") $("selTeleMode").value = String(v).toLowerCase();
     if (k === "tele_ms") $("inTeleMs").value = v;
+
+    if (k === "min_pos") $("inCalMin").value = v;
+    if (k === "max_pos") $("inCalMax").value = v;
+    if (k === "neutral_pos") $("inCalNeutral").value = v;
+    if (k === "cal_dir") $("selCalDir").value = String(v);
+    if (k === "pot_min") $("inPotMin").value = v;
+    if (k === "pot_max") $("inPotMax").value = v;
   }
 
   function parseLogBegin(line) {
-    // logfile_begin /log_xxx size=12345 format=bin record_size=13 header_size=56 footer_size=8
     const sizeMatch = line.match(/size=(\d+)/);
     if (!sizeMatch) return;
     logExpectedBytes = parseInt(sizeMatch[1], 10);
@@ -625,6 +659,13 @@
   $("btnThrPct").onclick = () => sendCmd(`safety set_threshold_pct ${$("inThrPct").value}`);
   $("btnSense").onclick = () => sendCmd(`safety sense ${$("selSense").value}`);
 
+  $("btnCalMin").onclick = () => sendCmd(`calibrate set_min ${$("inCalMin").value}`);
+  $("btnCalMax").onclick = () => sendCmd(`calibrate set_max ${$("inCalMax").value}`);
+  $("btnCalNeutral").onclick = () => sendCmd(`calibrate set_neutral ${$("inCalNeutral").value}`);
+  $("btnCalDir").onclick = () => sendCmd(`calibrate direction ${$("selCalDir").value}`);
+  $("btnPotMin").onclick = () => sendCmd(`calibrate pot_min ${$("inPotMin").value}`);
+  $("btnPotMax").onclick = () => sendCmd(`calibrate pot_max ${$("inPotMax").value}`);
+
   $("btnLogList").onclick = () => sendCmd("log list");
   $("btnLogRead").onclick = () => sendCmd(`log read ${$("inLogRead").value}`);
   $("btnLogCancel").onclick = () => sendCmd("log cancel");
@@ -636,4 +677,3 @@
 </script>
 </body>
 </html>
-
