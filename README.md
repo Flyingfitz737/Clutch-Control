@@ -1,94 +1,132 @@
+# EMC Type 1 Controller (Clutch Control Firmware)
 
-## EMC Type 1 Controller — ESP32 Hydraulic Clutch Control
-
-This project is an ESP32-based controller designed to regulate a hydraulic clutch/valve using **RPM feedback** and a **PID control loop**. It supports both **automatic (closed-loop) control** and **manual potentiometer control**, includes a **hardware arm switch**, a **safety override**, and provides **USB Serial + Bluetooth Classic** for configuration and live telemetry. All key settings can be saved to ESP32 NVS so the controller restores configuration on reboot.
-
-### Key Features
-
-* **Dual modes**
-
-  * **AUTO (PID):** maintains target RPM using a PID loop that drives a servo-actuated hydraulic valve.
-  * **MANUAL:** maps a manual potentiometer to servo position for direct operator control.
-* **Period-based RPM measurement**
-
-  * Interrupt-driven tach input; computes RPM from pulse timing for high resolution across a wide RPM range.
-  * Optional **noise rejection** and **EMA smoothing** for stable readings.
-* **Safety + operator controls**
-
-  * **Arm switch** for hardware enable/disable.
-  * **Safety override** using the manual pot threshold (fast LED flash when triggered; disarm on release below threshold).
-  * **Status LED patterns** for state indication (armed/disarmed/override).
-* **Configuration interfaces**
-
-  * Commands over **USB Serial** and **Bluetooth Classic** (mirrored output to both).
-* **Non-volatile persistence**
-
-  * Servo calibration, PID gains, target RPM, sample rate, smoothing alpha, PPR, thresholds, etc. saved in NVS.
+Firmware for an ESP32-based EMC Type 1 clutch controller featuring a high‑priority deterministic control loop, BLE telemetry/commands, safety override logic, and binary logging to LittleFS.
 
 ---
 
-## Hardware Overview
+## Features
 
-Typical connections (adjust as needed):
-
-* RPM/Tach input (interrupt-capable GPIO)
-* Two analog pots:
-
-  * “Control pot” (optional UI / monitoring)
-  * “Manual pot” (manual mode + safety override threshold source)
-* Servo output (hydraulic valve/clutch actuator)
-* Arm switch input (pulled-up, switch to GND)
-* Status LED output
+- **Deterministic control loop (333 Hz)** with watchdog supervision
+- **PID clutch control** with adjustable gains and aggressiveness
+- **Manual mode** using potentiometer input
+- **Safety override** with hysteresis and cooldown
+- **BLE UART (NUS)** command/telemetry interface
+- **Binary logging** to LittleFS with session headers/footers
+- **CSV streaming** of log samples over BLE when disarmed
+- **Persistent settings** via NVS (Preferences)
 
 ---
 
-## How the Code Works (High-Level)
+## Hardware
 
-The sketch is organized around a few core responsibilities:
+- **Target MCU:** ESP32  
+- **Servo control:** standard PWM servo (clutch)
+- **RPM sensor:** pulse input (configurable PPR)
+- **Potentiometers:** setpoint/manual control and override sense
+- **Status LED + Arm Switch**
 
-1. **RPM capture (interrupt-driven)**
-
-   * An ISR triggers on the tach signal edge and records pulse timing.
-   * The main loop periodically computes RPM from the **measured period** (time between accepted pulses).
-   * Optional smoothing (EMA) provides a stable RPM value for control.
-
-2. **State management (ARMED vs DISARMED)**
-
-   * When **disarmed**, the servo follows the manual potentiometer (manual control).
-   * When **armed**, the PID loop is active and drives the servo to maintain the target RPM.
-   * A pre-arm “start position” places the servo at a known engagement point before PID takes over.
-
-3. **PID control**
-
-   * Uses `PID_v1` with user-tunable gains (Kp/Ki/Kd).
-   * PID sample time is configurable (e.g., 10–200 ms).
-   * A separate **aggressiveness multiplier** can scale the PID output without changing gains.
-
-4. **Safety override**
-
-   * If enabled, moving the manual pot above a configured threshold triggers an override state (fast LED flash).
-   * Once the pot returns below threshold, the system disarms back into manual mode.
-
-5. **Commands + persistence**
-
-   * Commands are accepted via Serial and Bluetooth (same command parser).
-   * Settings can be changed live; a `save` command writes them to ESP32 Preferences (NVS) so they load on reboot.
+> Pinout intentionally omitted. See source code for pin constants.
 
 ---
 
-## Common Commands (Examples)
+## Build & Flash (Arduino IDE)
 
-* Set target RPM: `setrpm 1500`
-* Set PID gains: `setpid 2.5 4.0 0.8`
-* Set PID sample time: `setsample 50`
-* Set RPM smoothing: `setalpha 0.20`
-* Set tach PPR: `ppr 2`
-* Arm / disarm: `arm` / `disarm`
-* Save settings: `save`
-* View status: `status`
+1. Install **ESP32 board support** in Arduino IDE.
+2. Install required libraries:
+   - **ESP32Servo**
+   - **NimBLE-Arduino**
+3. Select your ESP32 board and port.
+4. Open the `.ino` file and **Upload**.
 
 ---
 
-## Notes / Intended Use
+## Core Behavior
 
-This controller is designed for experimentation and controlled environments. If used on real equipment, implement appropriate mechanical and electrical safeguards (independent kill/disarm, proper power supply isolation for the servo, shielding on tach wiring, etc.).
+### Modes
+- **Manual (disarmed):** servo follows manual potentiometer
+- **Auto (armed):** PID loop drives servo to maintain target RPM
+
+### Control Loop
+- Fixed **3 ms** loop period (~333 Hz)
+- Runs on dedicated FreeRTOS task (core 1)
+- Watchdog monitoring enabled
+
+---
+
+## BLE Interface
+
+- **Device name:** `EMC_UNO`
+- **Service:** Nordic UART Service (NUS)
+
+### Common Commands
+
+```
+getall
+get <key>
+setrpm <rpm>
+setpid <kp> <ki> <kd>
+piddir direct|reverse
+aggressiveness <0.1-3.0>
+setstart <deg>
+prehold on|off
+setalpha <0.10-0.50>
+ppr <1|2|4>
+telemetry auto|on|off
+telemetry rate <ms>
+calibrate set_min|set_max|set_neutral <val>
+calibrate direction <0|1>
+calibrate pot_min|pot_max <val>
+safety enable|disable
+safety set_threshold_pct <0-100>
+safety sense normal|reversed
+save
+arm
+disarm
+status
+help
+```
+
+### Telemetry Output
+
+Example telemetry line:
+```
+tele rpm=XXXX target=YYYY servo=ZZZ mode=AUTO pid_out=AAA prehold=1 dirty=0
+```
+
+---
+
+## Logging
+
+- Logs are stored in **LittleFS** (`/log_<id>_<timestamp>.bin`)
+- Binary format with header/footer
+- Download via BLE:
+
+```
+log list
+log read <file>
+log cancel
+```
+
+---
+
+## Safety Override
+
+When enabled, the manual potentiometer can **force disarm** if it exceeds a configurable threshold. Includes hysteresis and cooldown to prevent rapid toggling.
+
+---
+
+## Configuration Persistence
+
+All settings are saved to NVS with the `save` command.
+
+---
+
+## License
+
+This project is licensed under the **MIT License**.
+
+---
+
+## Disclaimer
+
+This firmware controls mechanical systems. Use responsibly and validate safety mechanisms in your environment.
