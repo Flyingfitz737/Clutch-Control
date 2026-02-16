@@ -199,6 +199,11 @@
       <label>List logs</label>
       <button id="btnLogList" disabled>log list</button>
 
+      <label>Available logs</label>
+      <select id="selLogFiles">
+        <option value="">Select log...</option>
+      </select>
+
       <label>Read log file (binary)</label>
       <input id="inLogRead" type="text" placeholder="/log_1_123456.bin" />
       <div class="btnRow">
@@ -245,6 +250,8 @@
   let logChunks = [];
   let logCsvText = "";
   let lastLogMeta = null;
+
+  let logFiles = [];
 
   let chart = null;
 
@@ -370,6 +377,26 @@
 
     if (line.startsWith("ack ")) {
       logLine("[ACK] " + line);
+      return;
+    }
+
+    if (line === "log_list_begin") {
+      logFiles = [];
+      return;
+    }
+
+    if (line.startsWith("log_file=")) {
+      const match = line.match(/log_file=(.+?) size=(\d+)/);
+      if (match) {
+        const name = match[1];
+        const size = match[2];
+        logFiles.push({ name, size });
+      }
+      return;
+    }
+
+    if (line === "log_list_end") {
+      updateLogSelect();
       return;
     }
 
@@ -559,6 +586,18 @@
     });
   }
 
+  function updateLogSelect() {
+    const sel = $("selLogFiles");
+    sel.innerHTML = '<option value="">Select log...</option>';
+    for (const f of logFiles) {
+      const opt = document.createElement("option");
+      opt.value = f.name;
+      opt.textContent = `${f.name} (${f.size} bytes)`;
+      sel.appendChild(opt);
+    }
+    logLine(`[LOG LIST] ${logFiles.length} files available`);
+  }
+
   async function connect() {
     if (!navigator.bluetooth) {
       alert("Web Bluetooth not available in this browser.");
@@ -669,6 +708,10 @@
   $("btnLogList").onclick = () => sendCmd("log list");
   $("btnLogRead").onclick = () => sendCmd(`log read ${$("inLogRead").value}`);
   $("btnLogCancel").onclick = () => sendCmd("log cancel");
+
+  $("selLogFiles").onchange = () => {
+    $("inLogRead").value = $("selLogFiles").value;
+  };
 
   $("btnCsv").onclick = downloadCsv;
 
